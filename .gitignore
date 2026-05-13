@@ -1,0 +1,44 @@
+# Python/cache
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+
+# Entornos y secretos
+.env
+.env.*
+venv/
+.venv/
+env/
+credenciales.py
+*credential*
+*secret*
+*clave*
+browser_session.json
+
+# Permitir pruebas que no contienen secretos reales
+!tests/test_credenciales.py
+
+# Logs y archivos temporales/runtime
+*.log
+log_*.txt
+diagnosticos/
+downloads/
+*.tmp
+*.temp
+
+# Build/packaging
+build/
+dist/
+portable/
+*.spec~
+
+# Node/frontend, por seguridad si se agregan despues
+node_modules/
+.next/
+
+# Sistema/editores
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

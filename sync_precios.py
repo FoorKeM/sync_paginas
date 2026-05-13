@@ -1,0 +1,367 @@
+"""
+SINCRONIZADOR DE PRECIOS: TIVENDO ERP → MERCADOHOUSE
+Flujo:
+  1. Login Tivendo → verifica empresa MERCADO HOUSE SPA (auto-corrige si está en NO USAR)
+  2. Clic en ERP Digital
+  3. Ventas → Informes de Ventas → Lista de Precios
+  4. Selecciona la lista de precios de la sucursal activa → Exportar
+  5. Login mercadohouse.cl
+  6. Configuración → Importar Lista de Precios
+  7. Selecciona local de la sucursal activa → sube el archivo → Cargar Lista de Precios
+"""
+
+import asyncio
+import sys
+from pathlib import Path
+from datetime import datetime
+from app_paths import runtime_path, configure_playwright_browsers, DESCARGA_DIR
+configure_playwright_browsers()
+from playwright.async_api import async_playwright
+import config as _cfg
+from utils import (
+    asegurar_empresa_mercadohouse,
+    click_y_capturar_pagina,
+    crear_logger,
+    crear_pagina_trabajo,
+    esperar_confirmacion_carga_mercadohouse,
+    esperar_carga_ligera,
+    guardar_diagnostico,
+    ir_a_importadores_mercadohouse,
+    limpiar_carpeta_archivos,
+    login_tivendo,
+    login_mercadohouse,
+    MedidorEtapas,
+    pausa_corta,
+    subir_archivo_mercadohouse,
+    rotar_log,
+)
+from credenciales import TIVENDO_EMAIL, TIVENDO_PASSWORD, MH_EMAIL, MH_PASSWORD
+
+# ============================================================
+#  CONFIGURACIÓN — edita credenciales en credenciales.py
+# ============================================================
+
+# Carpeta donde se guardará el archivo descargado de Tivendo
+CARPETA_DESCARGA = str(DESCARGA_DIR)
+
+# True = ver el navegador, False = correr invisible
+MOSTRAR_NAVEGADOR = False
+PAUSAR_ENTRE_PASOS = False
+# ============================================================
+
+LOG_FILE = runtime_path("log_sync.txt")
+log = crear_logger(LOG_FILE)
+
+
+async def pausar_paso(mensaje: str):
+    if not PAUSAR_ENTRE_PASOS:
+        return
+    print()
+    input(f"  PAUSA: {mensaje}\n  Revisa el navegador y presiona ENTER para continuar...")
+    print()
+
+
+async def click_informes_ventas_clasico(page, log_fn):
+    """Hace clic en el informe clasico, no en 'Informes de Ventas (Nuevo)'."""
+    enlaces_exactos = page.get_by_role("link", name="Informes de Ventas", exact=True)
+    cantidad = await enlaces_exactos.count()
+    if cantidad > 0:
+        destino = enlaces_exactos.last
+        await destino.scroll_into_view_if_needed()
+        await destino.click()
+        log_fn(f"  Informe clasico seleccionado por enlace exacto ({cantidad} encontrado(s))")
+        return
+
+    resultado = await page.evaluate(
+        """
+        () => {
+            const normalizar = (txt) => (txt || '').replace(/\\s+/g, ' ').trim();
+            const visibles = Array.from(document.querySelectorAll('a, [role="link"], li, div, span'))
+                .filter((el) => {
+                    const texto = normalizar(el.innerText || el.textContent);
+                    if (texto !== 'Informes de Ventas') return false;
+                    const estilo = window.getComputedStyle(el);
+                    const rect = el.getBoundingClientRect();
+                    return estilo.display !== 'none'
+                        && estilo.visibility !== 'hidden'
+                        && rect.width > 0
+                        && rect.height > 0;
+                });
+            const destino = visibles[visibles.length - 1];
+            if (!destino) {
+                return { ok: false, encontrados: visibles.length };
+            }
+            destino.scrollIntoView({ block: 'center', inline: 'nearest' });
+            destino.click();
+            return { ok: true, encontrados: visibles.length };
+        }
+        """
+    )
+    if not resultado.get("ok"):
+        raise Exception("No se encontro el enlace clasico 'Informes de Ventas' (sin Nuevo).")
+    log_fn(f"  Informe clasico seleccionado por texto visible ({resultado.get('encontrados')} encontrado(s))")
+
+
+async def esperar_erp_digital_abierto(page, log_fn):
+    """Espera señales reales del ERP; evita confundir el portal con el módulo ERP."""
+    limite = asyncio.get_event_loop().time() + 45
+    while asyncio.get_event_loop().time() < limite:
+        for texto in ("Ecosistema Digital", "Clientes y Productos", "Listado de Documentos"):
+            try:
+                if await page.get_by_text(texto, exact=True).count() > 0:
+                    log_fn(f"✓ ERP Digital detectado por menú: {texto}")
+                    return
+            except Exception:
+                pass
+
+        # Si seguimos en el portal, a veces el primer clic solo enfoca la tarjeta.
+        try:
+            en_portal = "portal.defontana.com/dashboard" in page.url
+            erp_card = page.get_by_text("ERP Digital", exact=True).last
+            if en_portal and await erp_card.count() > 0:
+                log_fn("  Aún en portal; reintentando clic en ERP Digital...")
+                await erp_card.click()
+        except Exception:
+            pass
+
+        await pausa_corta(0.5)
+
+    raise Exception(f"ERP Digital no terminó de abrir. URL actual: {page.url}")
+
+
+async def sincronizar():
+    rotar_log(LOG_FILE)
+    medidor = MedidorEtapas(log)
+
+    log("=" * 55)
+    log("INICIO SINCRONIZACIÓN TIVENDO → MERCADOHOUSE")
+    log("=" * 55)
+
+    # Crear carpeta de descarga si no existe
+    Path(CARPETA_DESCARGA).mkdir(parents=True, exist_ok=True)
+    try:
+        n = limpiar_carpeta_archivos(CARPETA_DESCARGA)
+        if n:
+            log(f"Carpeta de descarga limpiada antes de exportar precios: {n} archivo(s)")
+    except Exception as e:
+        log(f"No se pudo limpiar la carpeta antes de exportar precios: {e}")
+
+    async with async_playwright() as p:
+        browser, context, page = await crear_pagina_trabajo(
+            p,
+            mostrar_navegador=MOSTRAR_NAVEGADOR,
+            carpeta_descarga=CARPETA_DESCARGA,
+            incognito=True,
+        )
+        # Contexto incógnito: sin caché ni cookies previas, evita bugs de DNS
+        try:
+            # ── 1. LOGIN TIVENDO ───────────────────────────────────
+            with medidor.etapa("Login Tivendo"):
+                await login_tivendo(page, TIVENDO_EMAIL, TIVENDO_PASSWORD, log)
+            await pausar_paso("Login Tivendo terminado")
+
+            # ── 2. VERIFICAR EMPRESA + IR A ERP DIGITAL ───────────
+            # Asegurarse de estar en MERCADO HOUSE SPA antes de entrar
+            # al módulo. Si la sesión quedó en "NO USAR", se corrige aquí.
+            with medidor.etapa("Verificar empresa"):
+                await asegurar_empresa_mercadohouse(page, log, TIVENDO_EMAIL, TIVENDO_PASSWORD)
+            await pausar_paso("Empresa verificada")
+
+            with medidor.etapa("Abrir ERP Digital"):
+                log("Haciendo clic en ERP Digital...")
+                erp_page, nueva_pestana = await click_y_capturar_pagina(
+                    context,
+                    page,
+                    page.get_by_text("ERP Digital", exact=True).last,
+                )
+
+            # Capturar nueva pestaña si abrió, o usar la misma
+            if nueva_pestana:
+                log("ERP Digital abrió en pestaña nueva")
+            else:
+                log("ERP Digital navegó en la misma pestaña")
+
+            await esperar_erp_digital_abierto(erp_page, log)
+            log(f"✓ En ERP Digital — {erp_page.url}")
+
+            # ── 3. NAVEGAR A INFORMES DE VENTAS ───────────────────
+            log("Navegando a Ventas > Informes de Ventas...")
+            # Clic en menú Ventas (primer nivel)
+            await erp_page.locator("text=Ventas").first.click()
+            await pausa_corta(0.2)
+            # Clic en submenú Ventas
+            ventas = erp_page.locator("text=Ventas")
+            cnt = await ventas.count()
+            if cnt >= 2:
+                await ventas.nth(1).click()
+            await pausa_corta(0.2)
+            # Clic en "Informes de Ventas" — excluye "Informes de Ventas (Nuevo)"
+            await click_informes_ventas_clasico(erp_page, log)
+            await erp_page.locator("text=Lista de Precios").last.wait_for(state="visible", timeout=25000)
+            log(f"✓ En Informes de Ventas — {erp_page.url}")
+
+            # ── 3b. ABRIR PESTAÑA LISTA DE PRECIOS ────────────────
+            log("Abriendo pestaña Lista de Precios...")
+            lista_tab = erp_page.locator("text=Lista de Precios").last
+            await lista_tab.scroll_into_view_if_needed()
+            await lista_tab.click()
+            await pausa_corta(0.5)
+            log("✓ Pestaña Lista de Precios abierta")
+
+            # ── 4. SELECCIONAR LISTA DE LA SUCURSAL ACTIVA ─────────
+            log(f"Seleccionando lista {_cfg.sucursal_activa()['tivendo_lista_erp']}...")
+
+            async def get_report_frame(base_page):
+                """Devuelve el frame que contiene el formulario de Lista de Precios,
+                o el page principal si no hay frames."""
+                limite = asyncio.get_event_loop().time() + 15
+                while asyncio.get_event_loop().time() < limite:
+                    frames = base_page.frames
+                    for f in frames:
+                        try:
+                            cnt = await f.locator("input[type='radio']").count()
+                            if cnt > 0:
+                                log(f"  Frames detectados: {len(frames)}")
+                                log(f"    → Frame con {cnt} radios encontrado")
+                                return f
+                        except Exception:
+                            pass
+                    await pausa_corta(0.3)
+                frames = base_page.frames
+                log(f"  Frames detectados: {len(frames)}")
+                log("  → Usando page principal (sin iframes con radios)")
+                return base_page
+
+            rframe = await get_report_frame(erp_page)
+
+            # Clic en radio "Una en particular" usando JavaScript dentro del frame
+            radio_js = """
+                () => {
+                    const radios = document.querySelectorAll('input[type="radio"]');
+                    for (const r of radios) {
+                        const txt = (r.parentElement?.innerText || r.labels?.[0]?.innerText || '');
+                        if (txt.toLowerCase().includes('una en particular')) {
+                            r.click();
+                            return 'ok-text:' + txt.trim();
+                        }
+                    }
+                    // fallback: segundo radio
+                    if (radios.length >= 2) {
+                        radios[1].click();
+                        return 'ok-nth1-fallback';
+                    }
+                    return 'not-found:total=' + radios.length;
+                }
+            """
+            result = await rframe.evaluate(radio_js)
+            log(f"  Radio click: {result}")
+
+            # Esperar el select con timeout generoso
+            select_loc = rframe.locator("select").first
+            try:
+                await select_loc.wait_for(state="visible", timeout=10000)
+            except Exception:
+                log("  select no apareció vía wait_for, intentando igual...")
+
+            # Obtener opciones para diagnóstico y selección robusta
+            options = await rframe.evaluate(
+                "() => Array.from(document.querySelectorAll('select option')).map(o => ({v: o.value, t: o.text.trim()}))"
+            )
+            log(f"  Opciones en select: {[o['t'] for o in options[:10]]}")
+
+            suc = _cfg.sucursal_activa()
+            lista_erp = suc["tivendo_lista_erp"]
+            match = next((o for o in options if lista_erp.upper() in o["t"].upper()), None)
+            if not match:
+                # fallback: buscar por cualquier palabra clave de la lista
+                kw = lista_erp.split()[1] if len(lista_erp.split()) > 1 else lista_erp
+                match = next((o for o in options if kw.upper() in o["t"].upper()), None)
+            if not match:
+                raise Exception(f"No se encontró '{lista_erp}' en el dropdown. Opciones: {[o['t'] for o in options]}")
+            await select_loc.select_option(value=match["v"])
+            await pausa_corta(0.2)
+            log(f"✓ Lista seleccionada: {match['t']}")
+
+            # ── 5. EXPORTAR ────────────────────────────────────────
+            with medidor.etapa("Exportar precios Tivendo"):
+                log("Haciendo clic en Exportar...")
+                async with erp_page.expect_download(timeout=30000) as download_info:
+                    await rframe.locator("a:has-text('Exportar'), button:has-text('Exportar'), input[value='Exportar']").last.click(force=True)
+
+                download = await download_info.value
+                nombre_archivo = download.suggested_filename or "lista_precios.xlsx"
+                ruta_archivo = str(Path(CARPETA_DESCARGA) / nombre_archivo)
+                await download.save_as(ruta_archivo)
+
+            log(f"✓ Archivo descargado: {nombre_archivo}")
+            log(f"  Guardado en: {ruta_archivo}")
+            archivo_precio = Path(ruta_archivo)
+            if not archivo_precio.exists():
+                raise Exception(f"El archivo exportado no existe antes de subirlo: {ruta_archivo}")
+            modificado = datetime.fromtimestamp(archivo_precio.stat().st_mtime).strftime("%Y-%m-%d %H:%M:%S")
+            log(f"  Verificacion archivo a subir: {archivo_precio.name}")
+            log(f"  Tamano: {archivo_precio.stat().st_size} bytes | Modificado: {modificado}")
+
+            # ── 6. LOGIN MERCADOHOUSE ──────────────────────────────
+            with medidor.etapa("Login Mercadohouse"):
+                await login_mercadohouse(page, MH_EMAIL, MH_PASSWORD, log)
+
+            # ── 7. IR A CONFIGURACIÓN → IMPORTADORES → LISTA DE PRECIOS ──
+            await ir_a_importadores_mercadohouse(page, "LISTA DE PRECIOS", log)
+            await page.get_by_role("combobox").wait_for(state="visible", timeout=15000)
+
+            # ── 8. SELECCIONAR LOCAL DE LA SUCURSAL ACTIVA ─────────
+            log(f"Seleccionando local {_cfg.sucursal_activa()['mh_local']}...")
+            # Abrir el dropdown MUI y usar role=option para evitar strict mode violation
+            await page.get_by_role("combobox").click()
+            await pausa_corta(0.2)
+            mh_local = _cfg.sucursal_activa()["mh_local"]
+            await page.get_by_role("option", name=mh_local).click()
+            await pausa_corta(0.2)
+            log("✓ Local seleccionado")
+
+            # ── 9. SUBIR EL ARCHIVO DESCARGADO ─────────────────────
+            with medidor.etapa("Subir precios Mercadohouse"):
+                archivo_precio = Path(ruta_archivo)
+                if not archivo_precio.exists():
+                    raise Exception(f"No existe el archivo que se intentara subir: {ruta_archivo}")
+                modificado = datetime.fromtimestamp(archivo_precio.stat().st_mtime).strftime("%Y-%m-%d %H:%M:%S")
+                log(f"Subiendo archivo exacto: {archivo_precio}")
+                log(f"Tamano: {archivo_precio.stat().st_size} bytes | Modificado: {modificado}")
+                await subir_archivo_mercadohouse(
+                    page,
+                    ruta_archivo,
+                    nombre_archivo,
+                    "CARGAR LISTA DE PRECIOS",
+                    log,
+                )
+                await esperar_confirmacion_carga_mercadohouse(page, log)
+            log("✓ Lista cargada")
+
+            # ── 11. LIMPIAR CARPETA DE DESCARGAS ───────────────────
+            try:
+                n = limpiar_carpeta_archivos(CARPETA_DESCARGA)
+                log(f"🗑️  Carpeta limpiada: {n} archivo(s) eliminado(s)")
+            except Exception as e:
+                log(f"⚠️  No se pudo limpiar la carpeta: {e}")
+
+            log("=" * 55)
+            log("✅ SINCRONIZACIÓN COMPLETADA EXITOSAMENTE")
+            log(f"   Local:   {_cfg.sucursal_activa()['mh_local']}")
+            log("=" * 55)
+
+        except Exception as e:
+            log(f"❌ ERROR: {e}")
+            captura = erp_page if 'erp_page' in dir() else page
+            await guardar_diagnostico(captura, e, log, "sync_precios", medidor)
+            medidor.resumen()
+            await browser.close()
+            sys.exit(1)
+
+        await browser.close()
+        medidor.resumen()
+        log("")
+
+
+if __name__ == "__main__":
+    asyncio.run(sincronizar())
