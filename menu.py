@@ -116,15 +116,16 @@ def banner():
     opcion("3", "Sync Precios", "Tivendo → MH", i3)
     opcion("4", "Sync Packs", "Tivendo → MH", i4)
     separador()
-    opcion("5", "COMPLETO MANUAL", "(1 → 2 → 3)")
+    opcion("5", "COMPLETO MANUAL", "(1 → 2 → 4 → 3)")
     opcion("6", "SYNC ART + PRECIOS", "(2 → 3)")
     opcion("7", "SYNC PACKS + PRECIOS", "(4 → 3)")
-    opcion("8", "Programar para HOY a la hora que elijas")
+    opcion("8", "SYNC TODO", "(2 → 4 → 3)")
+    opcion("9", "Programar para HOY a la hora que elijas")
     separador()
-    opcion("9", "Cambiar sucursal activa")
-    opcion("10", "Editar credenciales (correos y claves)")
-    opcion("11", "Salir")
-    opcion("12", "Borrar sesion guardada")
+    opcion("10", "Cambiar sucursal activa")
+    opcion("11", "Editar credenciales (correos y claves)")
+    opcion("12", "Salir")
+    opcion("13", "Borrar sesion guardada")
     linea("╚", "═", "╝")
     info = tarea_hoy_info()
     if info:
@@ -298,11 +299,12 @@ async def run_packs():
 
 # ── Ciclo completo ─────────────────────────────────────────
 async def run_completo():
-    titulo("CICLO COMPLETO  1 ➜ 2 ➜ 3")
+    titulo("CICLO COMPLETO  1 ➜ 2 ➜ 4 ➜ 3")
     inicio = datetime.now()
     pasos = [
         ("Upload Precios → Tivendo POS",    run_upload),
         ("Sync Artículos Tivendo POS → MH", run_articulos),
+        ("Sync Packs     Tivendo POS → MH", run_packs),
         ("Sync Precios   Tivendo ERP → MH", run_precios),
     ]
     resultados = []
@@ -420,10 +422,45 @@ async def run_packs_y_precios():
     print("  " + "═" * 54)
 
 
+async def run_sync_todo():
+    titulo("SYNC TODO  2 ➜ 4 ➜ 3")
+    inicio = datetime.now()
+    pasos = [
+        ("Sync Artículos Tivendo POS → MH", run_articulos),
+        ("Sync Packs     Tivendo POS → MH", run_packs),
+        ("Sync Precios   Tivendo ERP → MH", run_precios),
+    ]
+    resultados = []
+    for nombre, fn in pasos:
+        print(f"\n  ▶  Iniciando: {nombre}...")
+        ok = await fn()
+        resultados.append((nombre, ok))
+        if not ok:
+            print(f"\n  ⚠️   Falló: {nombre}")
+            resp = input("  ¿Continuar con el siguiente paso de todas formas? (s/n): ").strip().lower()
+            if resp != "s":
+                print("  Proceso abortado.")
+                break
+
+    dur = datetime.now() - inicio
+    m, s = divmod(int(dur.total_seconds()), 60)
+    print()
+    print("  " + "═" * 54)
+    print("  RESUMEN")
+    print("  " + "═" * 54)
+    for nombre, ok in resultados:
+        icono = "✅" if ok else "❌"
+        print(f"  {icono}  {nombre}")
+    print(f"\n  Tiempo total: {m}m {s}s")
+    if all(ok for _, ok in resultados):
+        print("  🎉  Todo completado sin errores.")
+    print("  " + "═" * 54)
+
+
 # ── Programar para HOY (tarea única, no repetitiva) ────────
 def programar_para_hoy():
     titulo("PROGRAMAR EJECUCIÓN PARA HOY")
-    print("  Esto programará el ciclo completo (1→2→3) para")
+    print("  Esto programará el ciclo completo (1→2→4→3) para")
     print("  ejecutarse UNA SOLA VEZ hoy a la hora que elijas.")
     print("  El equipo debe estar encendido a esa hora.")
     print()
@@ -537,7 +574,7 @@ async def modo_automatico():
     with open(log_auto, "a", encoding="utf-8") as f:
         f.write(msg + "\n")
 
-    # Recuperar archivo de precios elegido al programar (opción 7)
+    # Recuperar archivo de precios elegido al programar
     excel_file = runtime_path("excel_programado.txt")
     if excel_file.exists() and _tiene_upload:
         ruta_excel = excel_file.read_text(encoding="utf-8").strip()
@@ -729,7 +766,7 @@ async def menu_principal():
     while True:
         clear()
         banner()
-        op = input("  Elige una opción (1-12): ").strip()
+        op = input("  Elige una opción (1-13): ").strip()
 
         if op == "1":
             await run_upload_manual_con_excel()
@@ -753,18 +790,21 @@ async def menu_principal():
             await run_packs_y_precios()
             esperar()
         elif op == "8":
-            programar_para_hoy()
+            await run_sync_todo()
             esperar()
         elif op == "9":
-            seleccionar_sucursal()
+            programar_para_hoy()
             esperar()
         elif op == "10":
-            editar_credenciales()
+            seleccionar_sucursal()
             esperar()
         elif op == "11":
+            editar_credenciales()
+            esperar()
+        elif op == "12":
             print("\n  Hasta luego!\n")
             break
-        elif op == "12":
+        elif op == "13":
             if borrar_sesion_guardada():
                 print("\n  Sesion guardada borrada. El proximo intento entrara limpio.\n")
             else:
