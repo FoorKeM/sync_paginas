@@ -12,6 +12,7 @@ Flujo:
 
 import asyncio
 import sys
+from html.parser import HTMLParser
 from pathlib import Path
 from datetime import datetime
 from app_paths import runtime_path, configure_playwright_browsers, DESCARGA_DIR
@@ -51,6 +52,63 @@ PAUSAR_ENTRE_PASOS = False
 
 LOG_FILE = runtime_path("log_sync.txt")
 log = crear_logger(LOG_FILE)
+PRECIOS_ESPERADOS: dict[str, int] = {}
+
+
+class _TablaPreciosParser(HTMLParser):
+    def __init__(self):
+        super().__init__()
+        self.fila_actual = None
+        self.celda_actual = None
+        self.filas = []
+
+    def handle_starttag(self, tag, attrs):
+        tag = tag.lower()
+        if tag == "tr":
+            self.fila_actual = []
+        elif tag == "td" and self.fila_actual is not None:
+            self.celda_actual = []
+
+    def handle_data(self, data):
+        if self.celda_actual is not None:
+            self.celda_actual.append(data)
+
+    def handle_endtag(self, tag):
+        tag = tag.lower()
+        if tag == "td" and self.celda_actual is not None:
+            self.fila_actual.append("".join(self.celda_actual).strip())
+            self.celda_actual = None
+        elif tag == "tr" and self.fila_actual is not None:
+            self.filas.append(self.fila_actual)
+            self.fila_actual = None
+
+
+def leer_precios_exportados(archivo: Path) -> dict[str, int]:
+    """Lee el .xls HTML exportado por Defontana sin librerías externas."""
+    contenido = archivo.read_text(encoding="latin-1", errors="replace")
+    parser = _TablaPreciosParser()
+    parser.feed(contenido)
+    precios = {}
+    for fila in parser.filas:
+        if len(fila) < 4:
+            continue
+        codigo = fila[1].replace("\xa0", "").lstrip("'").strip().upper()
+        precio = fila[3].replace("\xa0", "").replace(",", "").replace(".", "").strip()
+        if codigo and precio.isdigit():
+            precios[codigo] = int(precio)
+    return precios
+
+
+def comparar_precios_exportados(
+    archivo: Path,
+    esperados: dict[str, int],
+) -> dict[str, tuple[int, int | None]]:
+    actuales = leer_precios_exportados(archivo)
+    return {
+        codigo: (precio, actuales.get(codigo))
+        for codigo, precio in esperados.items()
+        if actuales.get(codigo) != precio
+    }
 
 
 async def pausar_paso(mensaje: str):
@@ -282,16 +340,48 @@ async def sincronizar():
             await pausa_corta(0.2)
             log(f"✓ Lista seleccionada: {match['t']}")
 
-            # ── 5. EXPORTAR ────────────────────────────────────────
-            with medidor.etapa("Exportar precios Tivendo"):
-                log("Haciendo clic en Exportar...")
-                async with erp_page.expect_download(timeout=30000) as download_info:
-                    await rframe.locator("a:has-text('Exportar'), button:has-text('Exportar'), input[value='Exportar']").last.click(force=True)
+            # ── 5. EXPORTAR Y VERIFICAR PROPAGACIÓN ────────────────
+            max_exportaciones = 5 if PRECIOS_ESPERADOS else 1
+            for intento_exportacion in range(1, max_exportaciones + 1):
+                with medidor.etapa("Exportar precios Tivendo"):
+                    log(f"Haciendo clic en Exportar... (intento {intento_exportacion}/{max_exportaciones})")
+                    async with erp_page.expect_download(timeout=30000) as download_info:
+                        await rframe.locator("a:has-text('Exportar'), button:has-text('Exportar'), input[value='Exportar']").last.click(force=True)
 
-                download = await download_info.value
-                nombre_archivo = download.suggested_filename or "lista_precios.xlsx"
-                ruta_archivo = str(Path(CARPETA_DESCARGA) / nombre_archivo)
-                await download.save_as(ruta_archivo)
+                    download = await download_info.value
+                    nombre_archivo = download.suggested_filename or "lista_precios.xlsx"
+                    ruta_archivo = str(Path(CARPETA_DESCARGA) / nombre_archivo)
+                    await download.save_as(ruta_archivo)
+
+                archivo_precio = Path(ruta_archivo)
+                if not PRECIOS_ESPERADOS:
+                    break
+
+                diferencias = comparar_precios_exportados(archivo_precio, PRECIOS_ESPERADOS)
+                if not diferencias:
+                    log(
+                        f"✓ ERP confirmado: {len(PRECIOS_ESPERADOS)} precio(s) "
+                        "coinciden con el cambio recién aplicado"
+                    )
+                    break
+
+                log(
+                    f"ERP aún no refleja {len(diferencias)} de "
+                    f"{len(PRECIOS_ESPERADOS)} precio(s)."
+                )
+                for codigo, (esperado, actual) in list(diferencias.items())[:10]:
+                    log(f"  {codigo}: esperado {esperado}, exportado {actual}")
+
+                if intento_exportacion == max_exportaciones:
+                    raise Exception(
+                        "El ERP no actualizó los precios a tiempo; "
+                        "se canceló la carga a Mercadohouse para no subir valores antiguos."
+                    )
+
+                archivo_precio.unlink(missing_ok=True)
+                espera = 45
+                log(f"Esperando {espera}s y volviendo a exportar la lista...")
+                await asyncio.sleep(espera)
 
             log(f"✓ Archivo descargado: {nombre_archivo}")
             log(f"  Guardado en: {ruta_archivo}")

@@ -53,6 +53,7 @@ LOG_FILE = runtime_path("log_subida.txt")
 log = crear_logger(LOG_FILE)
 ULTIMO_RESULTADO_PRECIOS: dict | None = None
 ULTIMO_EXCEL_USADO: str | None = None
+ULTIMOS_PRECIOS_CONFIRMADOS: dict[str, int] = {}
 
 
 def resumen_excel_precios(excel_path: Path) -> tuple[int, list[list[str]]]:
@@ -428,9 +429,10 @@ async def asegurar_punto_ventas_abierto(context, page, log_fn):
 
 
 async def subir_precios():
-    global ULTIMO_RESULTADO_PRECIOS, ULTIMO_EXCEL_USADO
+    global ULTIMO_RESULTADO_PRECIOS, ULTIMO_EXCEL_USADO, ULTIMOS_PRECIOS_CONFIRMADOS
     ULTIMO_RESULTADO_PRECIOS = None
     ULTIMO_EXCEL_USADO = None
+    ULTIMOS_PRECIOS_CONFIRMADOS = {}
     rotar_log(LOG_FILE)
     medidor = MedidorEtapas(log)
 
@@ -450,6 +452,7 @@ async def subir_precios():
     log(f"Ruta completa        : {excel_path}")
     log(f"Tamaño               : {excel_path.stat().st_size} bytes")
     log(f"Modificado           : {datetime.fromtimestamp(excel_path.stat().st_mtime).strftime('%Y-%m-%d %H:%M')}")
+    filas_excel = []
     try:
         total_filas, filas_excel = resumen_excel_precios(excel_path)
         log(f"Filas de precios     : {total_filas}")
@@ -576,6 +579,12 @@ async def subir_precios():
                 "archivo": excel_path.name,
                 "lista": _cfg.sucursal_activa()["tivendo_lista_erp"],
             }
+            fallidos_normalizados = {codigo.strip().upper() for codigo in fallidos_resultado}
+            for fila in filas_excel[1:]:
+                codigo = _valor_fila(fila, 0).lstrip("'").strip().upper()
+                precio = _valor_fila(fila, 3).replace(".", "").replace(",", "").strip()
+                if codigo and codigo not in fallidos_normalizados and precio.isdigit():
+                    ULTIMOS_PRECIOS_CONFIRMADOS[codigo] = int(precio)
 
             log("=" * 50)
             if fallidos_resultado:

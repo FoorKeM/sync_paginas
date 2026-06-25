@@ -281,11 +281,24 @@ async def run_articulos():
 
 async def run_precios():
     titulo("PASO 3 — Sync Precios Tivendo ERP → Mercadohouse")
-    return await ejecutar_con_reintentos(
-        "Sync Precios",
-        lambda: _tiene_precios,
-        sync_precios.sincronizar
+    esperados = (
+        dict(getattr(upload_precios, "ULTIMOS_PRECIOS_CONFIRMADOS", {}))
+        if _tiene_upload
+        else {}
     )
+    sync_precios.PRECIOS_ESPERADOS = esperados
+    if esperados:
+        print(f"  Verificando propagacion de {len(esperados)} precio(s) antes de subir a Mercadohouse.")
+    try:
+        return await ejecutar_con_reintentos(
+            "Sync Precios",
+            lambda: _tiene_precios,
+            sync_precios.sincronizar
+        )
+    finally:
+        sync_precios.PRECIOS_ESPERADOS = {}
+        if _tiene_upload:
+            upload_precios.ULTIMOS_PRECIOS_CONFIRMADOS = {}
 
 
 async def run_packs():
@@ -298,7 +311,7 @@ async def run_packs():
 
 
 # ── Ciclo completo ─────────────────────────────────────────
-async def run_completo():
+async def run_completo(interactivo=True):
     titulo("CICLO COMPLETO  1 ➜ 2 ➜ 4 ➜ 3")
     inicio = datetime.now()
     pasos = [
@@ -314,10 +327,13 @@ async def run_completo():
         resultados.append((nombre, ok))
         if not ok:
             print(f"\n  ⚠️   Falló: {nombre}")
-            resp = input("  ¿Continuar con el siguiente paso de todas formas? (s/n): ").strip().lower()
-            if resp != "s":
-                print("  Proceso abortado.")
-                break
+            if interactivo:
+                resp = input("  ¿Continuar con el siguiente paso de todas formas? (s/n): ").strip().lower()
+                if resp != "s":
+                    print("  Proceso abortado.")
+                    break
+            else:
+                print("  Modo automatico: se intentara el siguiente paso.")
 
     dur = datetime.now() - inicio
     m, s = divmod(int(dur.total_seconds()), 60)
@@ -586,7 +602,7 @@ async def modo_automatico():
                 f.write(msg_excel + "\n")
         excel_file.unlink(missing_ok=True)
 
-    todos_ok = await run_completo()
+    todos_ok = await run_completo(interactivo=False)
 
     ts2 = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     msg2 = f"[{ts2}] EJECUCIÓN AUTOMÁTICA FINALIZADA"
