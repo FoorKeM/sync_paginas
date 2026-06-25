@@ -4,6 +4,18 @@ import notificaciones_whatsapp
 
 
 class WhatsAppMessageTests(unittest.TestCase):
+    def test_detecta_lista_de_participantes_como_nombre_invalido(self):
+        self.assertTrue(
+            notificaciones_whatsapp._parece_lista_participantes(
+                "Encargado, +56 9 1111 1111, +56 9 2222 2222, Tú"
+            )
+        )
+        self.assertFalse(
+            notificaciones_whatsapp._parece_lista_participantes(
+                "Sistemas Mercadohouse"
+            )
+        )
+
     def test_construir_mensaje_exitoso(self):
         mensaje = notificaciones_whatsapp.construir_mensaje(
             {
