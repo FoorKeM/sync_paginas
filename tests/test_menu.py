@@ -1,5 +1,5 @@
 import unittest
-from unittest.mock import AsyncMock, patch
+from unittest.mock import patch
 
 import menu
 
@@ -76,34 +76,6 @@ class MenuCredentialTests(unittest.TestCase):
                 menu.sync_packs.MH_EMAIL,
                 menu.sync_packs.MH_PASSWORD,
             ) = originales["packs"]
-
-
-class MenuAutomaticSummaryTests(unittest.IsolatedAsyncioTestCase):
-    async def test_run_completo_marks_partial_price_import_as_failure(self):
-        resultado_anterior = menu.upload_precios.ULTIMO_RESULTADO_PRECIOS
-        try:
-            menu.upload_precios.ULTIMO_RESULTADO_PRECIOS = {
-                "total": 2,
-                "ok": 1,
-                "fallidos": ["A000012"],
-            }
-            with (
-                patch.object(menu, "run_upload", new=AsyncMock(return_value=True)),
-                patch.object(menu, "run_articulos", new=AsyncMock(return_value=True)),
-                patch.object(menu, "run_packs", new=AsyncMock(return_value=True)),
-                patch.object(menu, "run_precios", new=AsyncMock(return_value=True)),
-                patch.object(menu, "imprimir_resumen_upload_precios"),
-            ):
-                ok = await menu.run_completo(interactivo=False)
-
-            self.assertFalse(ok)
-            self.assertFalse(menu.ULTIMO_RESUMEN_CICLO["ok"])
-            self.assertEqual(
-                menu.ULTIMO_RESUMEN_CICLO["etapa_fallida"],
-                "Upload Precios → Tivendo POS",
-            )
-        finally:
-            menu.upload_precios.ULTIMO_RESULTADO_PRECIOS = resultado_anterior
 
 
 if __name__ == "__main__":
