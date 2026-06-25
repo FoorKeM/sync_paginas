@@ -15,6 +15,8 @@ credenciales.py
 *secret*
 *clave*
 browser_session.json
+whatsapp_profile/
+whatsapp_config.json
 
 # Permitir pruebas que no contienen secretos reales
 !tests/test_credenciales.py

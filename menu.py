@@ -49,6 +49,15 @@ try:
 except ImportError:
     _tiene_packs = False
 
+try:
+    import notificaciones_whatsapp
+    _tiene_whatsapp = True
+except ImportError:
+    _tiene_whatsapp = False
+
+
+ULTIMO_RESUMEN_CICLO = None
+
 
 # ── Utilidades de pantalla ─────────────────────────────────
 def clear():
@@ -126,6 +135,7 @@ def banner():
     opcion("11", "Editar credenciales (correos y claves)")
     opcion("12", "Salir")
     opcion("13", "Borrar sesion guardada")
+    opcion("14", "Configurar WhatsApp")
     linea("╚", "═", "╝")
     info = tarea_hoy_info()
     if info:
@@ -312,6 +322,7 @@ async def run_packs():
 
 # ── Ciclo completo ─────────────────────────────────────────
 async def run_completo(interactivo=True):
+    global ULTIMO_RESUMEN_CICLO
     titulo("CICLO COMPLETO  1 ➜ 2 ➜ 4 ➜ 3")
     inicio = datetime.now()
     pasos = [
@@ -345,7 +356,42 @@ async def run_completo(interactivo=True):
         icono = "✅" if ok else "❌"
         print(f"  {icono}  {nombre}")
     imprimir_resumen_upload_precios()
-    todos_ok = all(ok for _, ok in resultados)
+    todos_pasos_ok = all(ok for _, ok in resultados)
+    fin = datetime.now()
+    segundos = int((fin - inicio).total_seconds())
+    minutos, segundos_restantes = divmod(segundos, 60)
+    resumen_precios = (
+        dict(getattr(upload_precios, "ULTIMO_RESULTADO_PRECIOS", {}) or {})
+        if _tiene_upload
+        else {}
+    )
+    etapa_fallida = next(
+        (nombre for nombre, ok in resultados if not ok),
+        "",
+    )
+    precios_con_fallos = bool(resumen_precios.get("fallidos"))
+    todos_ok = todos_pasos_ok and not precios_con_fallos
+    if precios_con_fallos and not etapa_fallida:
+        etapa_fallida = "Upload Precios → Tivendo POS"
+    ULTIMO_RESUMEN_CICLO = {
+        "ok": todos_ok,
+        "sucursal": _cfg.sucursal_activa()["mh_local"],
+        "inicio": inicio.isoformat(timespec="seconds"),
+        "fin": fin.isoformat(timespec="seconds"),
+        "hora_fin": fin.strftime("%H:%M"),
+        "duracion_segundos": segundos,
+        "duracion": (
+            f"{minutos}m {segundos_restantes}s"
+            if minutos
+            else f"{segundos_restantes}s"
+        ),
+        "pasos": [
+            {"nombre": nombre, "ok": bool(ok)}
+            for nombre, ok in resultados
+        ],
+        "precios": resumen_precios,
+        "etapa_fallida": etapa_fallida,
+    }
     print(f"\n  Tiempo total: {m}m {s}s")
     if todos_ok:
         print("  🎉  Todo completado sin errores.")
@@ -580,6 +626,7 @@ def programar_para_hoy():
 
 # ── Modo --auto (llamado por la tarea de Windows) ──────────
 async def modo_automatico():
+    global ULTIMO_RESUMEN_CICLO
     apagar = "--shutdown" in sys.argv
 
     log_auto = runtime_path("log_automatico.txt")
@@ -602,13 +649,50 @@ async def modo_automatico():
                 f.write(msg_excel + "\n")
         excel_file.unlink(missing_ok=True)
 
-    todos_ok = await run_completo(interactivo=False)
+    try:
+        todos_ok = await run_completo(interactivo=False)
+    except Exception as exc:
+        todos_ok = False
+        fin_error = datetime.now()
+        ULTIMO_RESUMEN_CICLO = {
+            "ok": False,
+            "sucursal": _cfg.sucursal_activa()["mh_local"],
+            "hora_fin": fin_error.strftime("%H:%M"),
+            "duracion": "Interrumpida",
+            "pasos": [],
+            "precios": (
+                dict(getattr(upload_precios, "ULTIMO_RESULTADO_PRECIOS", {}) or {})
+                if _tiene_upload
+                else {}
+            ),
+            "etapa_fallida": f"Ejecucion automatica: {exc}",
+        }
 
     ts2 = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     msg2 = f"[{ts2}] EJECUCIÓN AUTOMÁTICA FINALIZADA"
     print(msg2)
     with open(log_auto, "a", encoding="utf-8") as f:
         f.write(msg2 + "\n")
+
+    if _tiene_whatsapp:
+        resumen = ULTIMO_RESUMEN_CICLO or {
+            "ok": todos_ok,
+            "sucursal": _cfg.sucursal_activa()["mh_local"],
+            "hora_fin": datetime.now().strftime("%H:%M"),
+            "duracion": "Sin informacion",
+            "pasos": [],
+            "precios": {},
+            "etapa_fallida": "Ejecucion automatica",
+        }
+        mensaje_whatsapp = notificaciones_whatsapp.construir_mensaje(resumen)
+        enviado = await notificaciones_whatsapp.enviar_notificacion(
+            mensaje_whatsapp,
+            intentos=3,
+            espera=20,
+        )
+        estado_whatsapp = "enviada" if enviado else "fallida"
+        with open(log_auto, "a", encoding="utf-8") as f:
+            f.write(f"[{ts2}] Notificacion WhatsApp: {estado_whatsapp}\n")
 
     # Apagar solo si fue solicitado Y el proceso terminó sin errores
     if apagar:
@@ -782,7 +866,7 @@ async def menu_principal():
     while True:
         clear()
         banner()
-        op = input("  Elige una opción (1-13): ").strip()
+        op = input("  Elige una opción (1-14): ").strip()
 
         if op == "1":
             await run_upload_manual_con_excel()
@@ -825,6 +909,15 @@ async def menu_principal():
                 print("\n  Sesion guardada borrada. El proximo intento entrara limpio.\n")
             else:
                 print("\n  No habia sesion guardada para borrar.\n")
+            esperar()
+        elif op == "14":
+            if not _tiene_whatsapp:
+                print("\n  No se pudo cargar el modulo de WhatsApp.\n")
+            else:
+                try:
+                    await notificaciones_whatsapp.configurar_whatsapp()
+                except Exception as exc:
+                    print(f"\n  No se pudo configurar WhatsApp: {exc}\n")
             esperar()
         else:
             print("  ⚠️  Opción no válida.")
