@@ -105,32 +105,6 @@ class MenuAutomaticSummaryTests(unittest.IsolatedAsyncioTestCase):
         finally:
             menu.upload_precios.ULTIMO_RESULTADO_PRECIOS = resultado_anterior
 
-    async def test_modo_automatico_no_notifica_si_todo_sale_bien(self):
-        resumen_anterior = menu.ULTIMO_RESUMEN_CICLO
-        try:
-            menu.ULTIMO_RESUMEN_CICLO = {
-                "ok": True,
-                "sucursal": "LIBERTADOR 1476",
-                "pasos": [],
-                "precios": {},
-                "duracion": "1m",
-                "hora_fin": "21:31",
-            }
-            with (
-                patch.object(menu, "run_completo", new=AsyncMock(return_value=True)),
-                patch.object(
-                    menu.notificaciones_whatsapp,
-                    "enviar_notificacion",
-                    new=AsyncMock(),
-                ) as enviar,
-                patch.object(menu.sys, "argv", ["MercadohouseSync.exe", "--auto"]),
-            ):
-                await menu.modo_automatico()
-
-            enviar.assert_not_awaited()
-        finally:
-            menu.ULTIMO_RESUMEN_CICLO = resumen_anterior
-
 
 if __name__ == "__main__":
     unittest.main()

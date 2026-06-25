@@ -674,7 +674,7 @@ async def modo_automatico():
     with open(log_auto, "a", encoding="utf-8") as f:
         f.write(msg2 + "\n")
 
-    if _tiene_whatsapp and not todos_ok:
+    if _tiene_whatsapp:
         resumen = ULTIMO_RESUMEN_CICLO or {
             "ok": todos_ok,
             "sucursal": _cfg.sucursal_activa()["mh_local"],
@@ -693,9 +693,6 @@ async def modo_automatico():
         estado_whatsapp = "enviada" if enviado else "fallida"
         with open(log_auto, "a", encoding="utf-8") as f:
             f.write(f"[{ts2}] Notificacion WhatsApp: {estado_whatsapp}\n")
-    elif _tiene_whatsapp:
-        with open(log_auto, "a", encoding="utf-8") as f:
-            f.write(f"[{ts2}] WhatsApp: sin aviso porque todo termino correctamente\n")
 
     # Apagar solo si fue solicitado Y el proceso terminó sin errores
     if apagar:
