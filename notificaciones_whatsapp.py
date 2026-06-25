@@ -78,37 +78,12 @@ async def _esperar_sesion(page, timeout: int) -> None:
 
 
 async def _nombre_chat_abierto(page) -> str:
-    textos = []
-    selectores = (
-        'header [data-testid="conversation-info-header-chat-title"]',
-        'header span[dir="auto"]',
-        '#pane-side [aria-selected="true"] span[title]',
-    )
-    for selector in selectores:
-        candidatos = page.locator(selector)
-        for indice in range(await candidatos.count()):
-            candidato = candidatos.nth(indice)
-            texto = (
-                (await candidato.get_attribute("title") or "")
-                or (await candidato.inner_text() or "")
-            ).strip()
-            if texto and texto not in textos:
-                textos.append(texto)
-
-    for texto in textos:
-        if not _parece_lista_participantes(texto):
+    candidatos = page.locator("header span[title]")
+    for indice in range(await candidatos.count()):
+        texto = (await candidatos.nth(indice).get_attribute("title") or "").strip()
+        if texto:
             return texto
-    raise RuntimeError("No se pudo reconocer con seguridad el nombre del grupo abierto")
-
-
-def _parece_lista_participantes(texto: str) -> bool:
-    normalizado = texto.lower()
-    return (
-        texto.count(",") >= 2
-        or texto.count("+56") >= 2
-        or (", tú" in normalizado)
-        or (", tu" in normalizado)
-    )
+    raise RuntimeError("No se pudo reconocer el grupo abierto")
 
 
 async def _buscar_y_abrir_grupo(page, grupo: str) -> None:
@@ -167,54 +142,46 @@ async def _enviar_en_chat_abierto(page, mensaje: str) -> None:
         if indice < len(lineas) - 1:
             await caja.press("Shift+Enter")
     await caja.press("Enter")
-    await page.wait_for_function(
-        "(elemento) => !(elemento.innerText || elemento.textContent || '').trim()",
-        arg=await caja.element_handle(),
-        timeout=15000,
-    )
-    await asyncio.sleep(1)
+
+    texto_confirmacion = next((linea for linea in lineas if linea.strip()), "")
+    if texto_confirmacion:
+        await page.locator("div.message-out").filter(
+            has_text=texto_confirmacion[:60]
+        ).last.wait_for(state="visible", timeout=15000)
 
 
 async def configurar_whatsapp() -> bool:
     """Abre WhatsApp visible, guarda el grupo abierto y envia una prueba."""
     async with async_playwright() as playwright:
         context = await _abrir_contexto_persistente(playwright, visible=True)
-        try:
-            page = context.pages[0] if context.pages else await context.new_page()
-            await page.goto(WHATSAPP_URL, wait_until="domcontentloaded", timeout=60000)
+        page = context.pages[0] if context.pages else await context.new_page()
+        await page.goto(WHATSAPP_URL, wait_until="domcontentloaded", timeout=60000)
 
-            print()
-            print("  WhatsApp Web se abrio en el navegador.")
-            print("  Si aparece un QR, escanealo con el telefono de Sistemas.")
-            print("  Luego abre el grupo que recibira las notificaciones.")
-            await _esperar_sesion(page, timeout=300)
-            input("  Cuando el grupo este abierto, presiona ENTER aqui...")
+        print()
+        print("  WhatsApp Web se abrio en el navegador.")
+        print("  Si aparece un QR, escanealo con el telefono de Sistemas.")
+        print("  Luego abre el grupo que recibira las notificaciones.")
+        await _esperar_sesion(page, timeout=300)
+        input("  Cuando el grupo este abierto, presiona ENTER aqui...")
 
-            try:
-                grupo = await _nombre_chat_abierto(page)
-                print(f"  Grupo detectado: {grupo}")
-            except Exception:
-                print("  WhatsApp no mostro claramente el nombre del grupo.")
-                grupo = input("  Escribe el nombre exacto del grupo abierto: ").strip()
-                if not grupo or _parece_lista_participantes(grupo):
-                    raise RuntimeError("El nombre ingresado no parece un nombre de grupo valido")
-
-            confirmar = input("  Guardar este grupo y enviar mensaje de prueba? (s/n): ").strip().lower()
-            if confirmar != "s":
-                print("  Configuracion cancelada.")
-                return False
-
-            mensaje = (
-                "✅ NOTIFICACIONES ACTIVADAS\n"
-                "MercadohouseSync quedo configurado para informar aqui "
-                "el resultado de las ejecuciones nocturnas."
-            )
-            await _enviar_en_chat_abierto(page, mensaje)
-            guardar_configuracion(grupo)
-            print("  Mensaje de prueba enviado correctamente.")
-            return True
-        finally:
+        grupo = await _nombre_chat_abierto(page)
+        print(f"  Grupo detectado: {grupo}")
+        confirmar = input("  Guardar este grupo y enviar mensaje de prueba? (s/n): ").strip().lower()
+        if confirmar != "s":
             await context.close()
+            print("  Configuracion cancelada.")
+            return False
+
+        guardar_configuracion(grupo)
+        mensaje = (
+            "✅ NOTIFICACIONES ACTIVADAS\n"
+            "MercadohouseSync quedo configurado para informar aqui "
+            "el resultado de las ejecuciones nocturnas."
+        )
+        await _enviar_en_chat_abierto(page, mensaje)
+        await context.close()
+        print("  Mensaje de prueba enviado correctamente.")
+        return True
 
 
 async def enviar_notificacion(mensaje: str, intentos: int = 3, espera: int = 20) -> bool:
