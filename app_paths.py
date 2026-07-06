@@ -1,6 +1,8 @@
 import os
 import sys
 import atexit
+import asyncio
+import subprocess
 import tempfile
 from pathlib import Path
 
@@ -35,9 +37,31 @@ DESCARGA_DIR.mkdir(parents=True, exist_ok=True)
 
 def configure_playwright_browsers() -> None:
     """Usa navegador portable si existe; si no, se usara Edge/Chrome del sistema."""
+    hide_child_console_windows()
     portable_browsers = APP_DIR / "ms-playwright"
     if portable_browsers.exists():
         os.environ.setdefault("PLAYWRIGHT_BROWSERS_PATH", str(portable_browsers))
+
+
+def hide_child_console_windows() -> None:
+    """Evita ventanas negras de procesos hijos como el driver Node de Playwright."""
+    if os.name != "nt" or getattr(asyncio, "_mercadohouse_no_console_patch", False):
+        return
+
+    original_exec = asyncio.create_subprocess_exec
+    original_shell = asyncio.create_subprocess_shell
+
+    async def create_subprocess_exec_no_window(*args, **kwargs):
+        kwargs.setdefault("creationflags", subprocess.CREATE_NO_WINDOW)
+        return await original_exec(*args, **kwargs)
+
+    async def create_subprocess_shell_no_window(*args, **kwargs):
+        kwargs.setdefault("creationflags", subprocess.CREATE_NO_WINDOW)
+        return await original_shell(*args, **kwargs)
+
+    asyncio.create_subprocess_exec = create_subprocess_exec_no_window
+    asyncio.create_subprocess_shell = create_subprocess_shell_no_window
+    asyncio._mercadohouse_no_console_patch = True
 
 
 def configure_console_encoding() -> None:
