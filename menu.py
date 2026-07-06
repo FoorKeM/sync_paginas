@@ -23,6 +23,10 @@ configure_playwright_browsers()
 import config as _cfg
 from version import APP_VERSION, APP_NAME
 
+SUBPROCESS_KWARGS = {}
+if os.name == "nt":
+    SUBPROCESS_KWARGS["creationflags"] = subprocess.CREATE_NO_WINDOW
+
 
 # ── Importar los 3 módulos ─────────────────────────────────
 try:
@@ -60,7 +64,7 @@ def tarea_hoy_info():
     try:
         r = subprocess.run(
             ["schtasks", "/Query", "/TN", "SyncMercadohouseHoy", "/FO", "LIST"],
-            capture_output=True, text=True
+            capture_output=True, text=True, **SUBPROCESS_KWARGS
         )
         if r.returncode == 0:
             for line in r.stdout.splitlines():
@@ -536,7 +540,11 @@ def programar_para_hoy():
     # El bat pasa --shutdown si el usuario eligió apagar
     flag_shutdown = " --shutdown" if apagar else ""
     if getattr(sys, "frozen", False):
-        tarea_auto = f'"{sys.executable}" --auto{flag_shutdown}'
+        auto_exe = Path(sys.executable).with_name("MercadohouseSyncAuto.exe")
+        if auto_exe.exists():
+            tarea_auto = f'"{auto_exe}"{flag_shutdown}'
+        else:
+            tarea_auto = f'"{sys.executable}" --auto{flag_shutdown}'
     else:
         bat_auto = HERE / "ejecutar_automatico.bat"
         comando_auto = f'"{sys.executable}" "{HERE / "menu.py"}" --auto{flag_shutdown}'
@@ -555,7 +563,7 @@ def programar_para_hoy():
 
     print(f"\n  Programando para hoy {fecha_hoy} a las {hora_fmt}...")
     try:
-        r = subprocess.run(cmd, capture_output=True, text=True)
+        r = subprocess.run(cmd, capture_output=True, text=True, **SUBPROCESS_KWARGS)
         if r.returncode == 0:
             runtime_path("excel_programado.txt").write_text(excel_elegido, encoding="utf-8")
             mins_restantes = int((hora_elegida - datetime.now()).total_seconds() // 60)
@@ -621,7 +629,7 @@ async def modo_automatico():
             with open(log_auto, "a", encoding="utf-8") as f:
                 f.write(f"[{ts2}] Apagado programado en 60 segundos\n")
             # /s = apagar  /f = forzar cierre de apps  /t 60 = 1 minuto de gracia
-            subprocess.run(["shutdown", "/s", "/f", "/t", "60"])
+            subprocess.run(["shutdown", "/s", "/f", "/t", "60"], **SUBPROCESS_KWARGS)
         else:
             print()
             print("  " + "═" * 54)
