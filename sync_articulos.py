@@ -42,7 +42,7 @@ from credenciales import TIVENDO_EMAIL, TIVENDO_PASSWORD, MH_EMAIL, MH_PASSWORD
 CARPETA_DESCARGA = str(DESCARGA_DIR)
 
 # True = ver el navegador, False = correr invisible
-MOSTRAR_NAVEGADOR = False
+MOSTRAR_NAVEGADOR = True
 # ============================================================
 
 LOG_FILE = runtime_path("log_articulos.txt")

@@ -39,7 +39,7 @@ from credenciales import TIVENDO_EMAIL, TIVENDO_PASSWORD, MH_EMAIL, MH_PASSWORD
 
 
 CARPETA_DESCARGA = str(DESCARGA_DIR)
-MOSTRAR_NAVEGADOR = False
+MOSTRAR_NAVEGADOR = True
 
 LOG_FILE = runtime_path("log_packs.txt")
 log = crear_logger(LOG_FILE)
