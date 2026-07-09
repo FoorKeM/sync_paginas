@@ -540,7 +540,11 @@ def programar_para_hoy():
     # El bat pasa --shutdown si el usuario eligió apagar
     flag_shutdown = " --shutdown" if apagar else ""
     if getattr(sys, "frozen", False):
-        tarea_auto = f'powershell.exe -NoProfile -WindowStyle Hidden -Command "Start-Process -FilePath ''{sys.executable}'' -ArgumentList ''--auto{flag_shutdown}'' -WindowStyle Hidden -Wait"'
+        auto_exe = Path(sys.executable).with_name("MercadohouseSyncAuto.exe")
+        if auto_exe.exists():
+            tarea_auto = f'"{auto_exe}"{flag_shutdown}'
+        else:
+            tarea_auto = f'"{sys.executable}" --auto{flag_shutdown}'
     else:
         bat_auto = HERE / "ejecutar_automatico.bat"
         comando_auto = f'"{sys.executable}" "{HERE / "menu.py"}" --auto{flag_shutdown}'
