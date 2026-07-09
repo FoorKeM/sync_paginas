@@ -42,7 +42,7 @@ from credenciales import TIVENDO_EMAIL as EMAIL, TIVENDO_PASSWORD as PASSWORD
 CARPETA_EXCEL = r"C:\Precios"
 
 # True = ver el navegador, False = correr invisible en segundo plano
-MOSTRAR_NAVEGADOR = True
+MOSTRAR_NAVEGADOR = False
 
 # Ruta al Excel a subir; si está seteada, omite la búsqueda automática.
 # La setea menu.py cuando el usuario elige el archivo en la opción 7.

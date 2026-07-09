@@ -46,7 +46,7 @@ from credenciales import TIVENDO_EMAIL, TIVENDO_PASSWORD, MH_EMAIL, MH_PASSWORD
 CARPETA_DESCARGA = str(DESCARGA_DIR)
 
 # True = ver el navegador, False = correr invisible
-MOSTRAR_NAVEGADOR = True
+MOSTRAR_NAVEGADOR = False
 PAUSAR_ENTRE_PASOS = False
 # ============================================================
 
