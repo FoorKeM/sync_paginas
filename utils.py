@@ -260,12 +260,21 @@ async def crear_pagina_trabajo(
 ):
     """Abre browser/context/page con las opciones comunes de los sincronizadores."""
     incognito = incognito or usar_modo_limpio()
-    args = ["--incognito"] if incognito else None
+    args = []
+    if incognito:
+        args.append("--incognito")
+    oculto_sin_headless = getattr(sys, "frozen", False) and not mostrar_navegador
+    if oculto_sin_headless:
+        args.extend([
+            "--start-minimized",
+            "--window-position=-32000,-32000",
+            "--window-size=800,600",
+        ])
     browser = await launch_chromium(
         p,
-        headless=not mostrar_navegador,
+        headless=False if oculto_sin_headless else not mostrar_navegador,
         downloads_path=carpeta_descarga,
-        args=args,
+        args=args or None,
     )
     context_kwargs = {
         "accept_downloads": accept_downloads,
