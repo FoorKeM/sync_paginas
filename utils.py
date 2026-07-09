@@ -222,7 +222,7 @@ async def reintentar_accion(nombre: str, accion, log_fn=None, intentos: int = 3,
 
 
 async def launch_chromium(p, headless=True, downloads_path=None, args=None):
-    """Lanza Chromium; en exe prefiere Edge/Chrome del sistema para no cargar navegador suelto."""
+    """Lanza Chromium; en exe prefiere el navegador controlado por Playwright."""
     kwargs = {"headless": headless}
     if downloads_path is not None:
         kwargs["downloads_path"] = downloads_path
@@ -231,6 +231,10 @@ async def launch_chromium(p, headless=True, downloads_path=None, args=None):
 
     if getattr(sys, "frozen", False):
         ultimo_error = None
+        try:
+            return await p.chromium.launch(**kwargs)
+        except Exception as exc:
+            ultimo_error = exc
         for channel in ("msedge", "chrome"):
             try:
                 return await p.chromium.launch(channel=channel, **kwargs)
