@@ -579,6 +579,18 @@ def programar_para_hoy():
 
 
 # ── Modo --auto (llamado por la tarea de Windows) ──────────
+def solicitar_apagado_windows(log_auto, ts):
+    # /s = apagar  /f = forzar cierre de apps  /t 60 = 1 minuto de gracia
+    r = subprocess.run(["shutdown", "/s", "/f", "/t", "60"], capture_output=True, text=True)
+    with open(log_auto, "a", encoding="utf-8") as f:
+        if r.returncode == 0:
+            f.write(f"[{ts}] Comando shutdown enviado correctamente\n")
+        else:
+            detalle = (r.stderr or r.stdout or "").strip()
+            f.write(f"[{ts}] ERROR al pedir apagado: codigo {r.returncode} {detalle}\n")
+    return r.returncode == 0
+
+
 async def modo_automatico():
     apagar = "--shutdown" in sys.argv
 
@@ -620,8 +632,8 @@ async def modo_automatico():
             print("  " + "═" * 54)
             with open(log_auto, "a", encoding="utf-8") as f:
                 f.write(f"[{ts2}] Apagado programado en 60 segundos\n")
-            # /s = apagar  /f = forzar cierre de apps  /t 60 = 1 minuto de gracia
-            subprocess.run(["shutdown", "/s", "/f", "/t", "60"])
+            if not solicitar_apagado_windows(log_auto, ts2):
+                print("  âš ï¸   Windows rechazo el comando de apagado. Revisa log_automatico.txt.")
         else:
             print()
             print("  " + "═" * 54)

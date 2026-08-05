@@ -1,5 +1,8 @@
 import unittest
 from unittest.mock import patch
+from tempfile import TemporaryDirectory
+from pathlib import Path
+from subprocess import CompletedProcess
 
 import menu
 
@@ -76,6 +79,39 @@ class MenuCredentialTests(unittest.TestCase):
                 menu.sync_packs.MH_EMAIL,
                 menu.sync_packs.MH_PASSWORD,
             ) = originales["packs"]
+
+    def test_solicitar_apagado_windows_sends_shutdown_command(self):
+        with TemporaryDirectory() as tmp, patch("menu.subprocess.run") as run:
+            run.return_value = CompletedProcess(
+                ["shutdown", "/s", "/f", "/t", "60"],
+                0,
+                "",
+                "",
+            )
+
+            ok = menu.solicitar_apagado_windows(Path(tmp) / "auto.log", "2026-08-05 12:00:00")
+
+        self.assertTrue(ok)
+        run.assert_called_once_with(
+            ["shutdown", "/s", "/f", "/t", "60"],
+            capture_output=True,
+            text=True,
+        )
+
+    def test_solicitar_apagado_windows_logs_failure(self):
+        with TemporaryDirectory() as tmp, patch("menu.subprocess.run") as run:
+            log = Path(tmp) / "auto.log"
+            run.return_value = CompletedProcess(
+                ["shutdown", "/s", "/f", "/t", "60"],
+                5,
+                "",
+                "Access denied",
+            )
+
+            ok = menu.solicitar_apagado_windows(log, "2026-08-05 12:00:00")
+
+            self.assertFalse(ok)
+            self.assertIn("ERROR al pedir apagado: codigo 5 Access denied", log.read_text(encoding="utf-8"))
 
 
 if __name__ == "__main__":

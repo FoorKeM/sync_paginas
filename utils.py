@@ -263,16 +263,9 @@ async def crear_pagina_trabajo(
     args = []
     if incognito:
         args.append("--incognito")
-    oculto_sin_headless = getattr(sys, "frozen", False) and not mostrar_navegador
-    if oculto_sin_headless:
-        args.extend([
-            "--start-minimized",
-            "--window-position=-32000,-32000",
-            "--window-size=800,600",
-        ])
     browser = await launch_chromium(
         p,
-        headless=False if oculto_sin_headless else not mostrar_navegador,
+        headless=not mostrar_navegador,
         downloads_path=carpeta_descarga,
         args=args or None,
     )

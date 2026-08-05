@@ -17,7 +17,7 @@ from pathlib import Path
 from datetime import datetime
 from app_paths import runtime_path, configure_playwright_browsers, DESCARGA_DIR
 configure_playwright_browsers()
-from playwright.async_api import async_playwright
+from playwright.async_api import TimeoutError as PlaywrightTimeoutError, async_playwright
 import config as _cfg
 from utils import (
     asegurar_empresa_mercadohouse,
@@ -53,6 +53,16 @@ PAUSAR_ENTRE_PASOS = False
 LOG_FILE = runtime_path("log_sync.txt")
 log = crear_logger(LOG_FILE)
 PRECIOS_ESPERADOS: dict[str, int] = {}
+
+BOTONES_CONFIRMAR_EXPORTACION = (
+    "Descargar",
+    "Guardar",
+    "Aceptar",
+    "Excel",
+    "Exportar",
+    "Generar",
+    "Continuar",
+)
 
 
 class _TablaPreciosParser(HTMLParser):
@@ -109,6 +119,108 @@ def comparar_precios_exportados(
         for codigo, precio in esperados.items()
         if actuales.get(codigo) != precio
     }
+
+
+async def _cancelar_tarea(tarea):
+    if tarea.done():
+        return
+    tarea.cancel()
+    try:
+        await tarea
+    except asyncio.CancelledError:
+        pass
+    except Exception:
+        pass
+
+
+async def _click_boton_confirmacion_exportacion(page_like, log_fn) -> bool:
+    """Confirma ventanas nuevas de exportacion de Tivendo si aparecen."""
+    candidatos = []
+    for texto in BOTONES_CONFIRMAR_EXPORTACION:
+        candidatos.extend([
+            page_like.get_by_role("button", name=texto, exact=False).first,
+            page_like.get_by_role("link", name=texto, exact=False).first,
+            page_like.locator(f"input[value*='{texto}']").first,
+        ])
+
+    for candidato in candidatos:
+        try:
+            await candidato.wait_for(state="visible", timeout=800)
+            await candidato.click(force=True, timeout=3000)
+            log_fn("  Ventana de exportacion confirmada")
+            return True
+        except Exception:
+            pass
+    return False
+
+
+async def _esperar_descarga_en_popup(popup, log_fn, timeout: int = 300000):
+    await esperar_carga_ligera(popup, timeout=15000)
+    log_fn(f"  Ventana de exportacion abierta: {popup.url}")
+
+    download_task = asyncio.create_task(popup.wait_for_event("download", timeout=timeout))
+    try:
+        for _ in range(12):
+            if download_task.done():
+                return await download_task
+
+            confirmado = await _click_boton_confirmacion_exportacion(popup, log_fn)
+            if confirmado:
+                return await download_task
+
+            for frame in popup.frames:
+                if download_task.done():
+                    return await download_task
+                if frame == popup.main_frame:
+                    continue
+                if await _click_boton_confirmacion_exportacion(frame, log_fn):
+                    return await download_task
+
+            await pausa_corta(0.5)
+
+        return await download_task
+    finally:
+        await _cancelar_tarea(download_task)
+
+
+async def exportar_precios_tivendo(erp_page, report_frame, carpeta_descarga: str, log_fn):
+    """Exporta precios aunque Tivendo intercale una ventana nueva antes de descargar."""
+    exportar = report_frame.locator(
+        "a:has-text('Exportar'), button:has-text('Exportar'), input[value='Exportar']"
+    ).last
+
+    download_task = asyncio.create_task(erp_page.wait_for_event("download", timeout=300000))
+    popup_task = asyncio.create_task(erp_page.wait_for_event("popup", timeout=0))
+    try:
+        await exportar.click(force=True)
+        done, _pending = await asyncio.wait(
+            {download_task, popup_task},
+            timeout=35,
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+
+        if download_task in done:
+            download = await download_task
+        elif popup_task in done:
+            popup = await popup_task
+            await _cancelar_tarea(download_task)
+            download = await _esperar_descarga_en_popup(popup, log_fn)
+        else:
+            await _cancelar_tarea(popup_task)
+            download = await download_task
+
+        nombre_archivo = download.suggested_filename or "lista_precios.xlsx"
+        ruta_archivo = str(Path(carpeta_descarga) / nombre_archivo)
+        await download.save_as(ruta_archivo)
+        return nombre_archivo, ruta_archivo
+    except PlaywrightTimeoutError as exc:
+        raise Exception(
+            "Tivendo no inicio la descarga de Lista de Precios. "
+            "Si quedo una ventana abierta, revisa si cambio el boton de confirmacion."
+        ) from exc
+    finally:
+        await _cancelar_tarea(download_task)
+        await _cancelar_tarea(popup_task)
 
 
 async def pausar_paso(mensaje: str):
@@ -345,13 +457,12 @@ async def sincronizar():
             for intento_exportacion in range(1, max_exportaciones + 1):
                 with medidor.etapa("Exportar precios Tivendo"):
                     log(f"Haciendo clic en Exportar... (intento {intento_exportacion}/{max_exportaciones})")
-                    async with erp_page.expect_download(timeout=30000) as download_info:
-                        await rframe.locator("a:has-text('Exportar'), button:has-text('Exportar'), input[value='Exportar']").last.click(force=True)
-
-                    download = await download_info.value
-                    nombre_archivo = download.suggested_filename or "lista_precios.xlsx"
-                    ruta_archivo = str(Path(CARPETA_DESCARGA) / nombre_archivo)
-                    await download.save_as(ruta_archivo)
+                    nombre_archivo, ruta_archivo = await exportar_precios_tivendo(
+                        erp_page,
+                        rframe,
+                        CARPETA_DESCARGA,
+                        log,
+                    )
 
                 archivo_precio = Path(ruta_archivo)
                 if not PRECIOS_ESPERADOS:
