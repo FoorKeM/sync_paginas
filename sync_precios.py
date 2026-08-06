@@ -53,6 +53,7 @@ PAUSAR_ENTRE_PASOS = False
 LOG_FILE = runtime_path("log_sync.txt")
 log = crear_logger(LOG_FILE)
 PRECIOS_ESPERADOS: dict[str, int] = {}
+ERP_DASHBOARD_URL = "https://erp.defontana.com/#/dashboard"
 
 BOTONES_CONFIRMAR_EXPORTACION = (
     "Descargar",
@@ -272,10 +273,56 @@ async def click_informes_ventas_clasico(page, log_fn):
     log_fn(f"  Informe clasico seleccionado por texto visible ({resultado.get('encontrados')} encontrado(s))")
 
 
+async def click_tarjeta_erp_digital(page, log_fn):
+    """Hace click en la tarjeta completa del portal, no solo en el texto."""
+    resultado = await page.evaluate(
+        """
+        () => {
+            const normalizar = (txt) => (txt || '').replace(/\\s+/g, ' ').trim();
+            const visibles = Array.from(document.querySelectorAll('a, button, mat-card, [role="button"], div, span'))
+                .filter((el) => {
+                    const texto = normalizar(el.innerText || el.textContent);
+                    if (texto !== 'ERP Digital') return false;
+                    const estilo = window.getComputedStyle(el);
+                    const rect = el.getBoundingClientRect();
+                    return estilo.display !== 'none'
+                        && estilo.visibility !== 'hidden'
+                        && rect.width > 0
+                        && rect.height > 0;
+                });
+            const texto = visibles[visibles.length - 1];
+            if (!texto) return { ok: false, encontrados: visibles.length };
+
+            let destino = texto.closest('a, button, [role="button"], mat-card, .mat-mdc-card, .mat-card');
+            if (!destino) {
+                destino = texto;
+                for (let i = 0; i < 4 && destino.parentElement; i++) {
+                    destino = destino.parentElement;
+                    const cursor = window.getComputedStyle(destino).cursor;
+                    if (cursor === 'pointer' || destino.onclick) break;
+                }
+            }
+            destino.scrollIntoView({ block: 'center', inline: 'nearest' });
+            destino.click();
+            return { ok: true, tag: destino.tagName, encontrados: visibles.length };
+        }
+        """
+    )
+    if not resultado.get("ok"):
+        raise Exception("No se encontro la tarjeta 'ERP Digital' en el portal.")
+    log_fn(f"  Click tarjeta ERP Digital ({resultado.get('tag')}, {resultado.get('encontrados')} encontrado(s))")
+
+
 async def esperar_erp_digital_abierto(page, log_fn):
     """Espera señales reales del ERP; evita confundir el portal con el módulo ERP."""
     limite = asyncio.get_event_loop().time() + 45
+    uso_url_directa = False
     while asyncio.get_event_loop().time() < limite:
+        if "erp.defontana.com" in page.url:
+            await esperar_carga_ligera(page)
+            log_fn("âœ“ ERP Digital detectado por URL")
+            return
+
         for texto in ("Ecosistema Digital", "Clientes y Productos", "Listado de Documentos"):
             try:
                 if await page.get_by_text(texto, exact=True).count() > 0:
@@ -287,6 +334,15 @@ async def esperar_erp_digital_abierto(page, log_fn):
         # Si seguimos en el portal, a veces el primer clic solo enfoca la tarjeta.
         try:
             en_portal = "portal.defontana.com/dashboard" in page.url
+            if en_portal:
+                if not uso_url_directa and asyncio.get_event_loop().time() > limite - 25:
+                    uso_url_directa = True
+                    log_fn("  ERP sigue en portal; abriendo URL directa del ERP...")
+                    await page.goto(ERP_DASHBOARD_URL, timeout=30000)
+                    continue
+                log_fn("  Aun en portal; reintentando click en tarjeta ERP Digital...")
+                await click_tarjeta_erp_digital(page, log_fn)
+                continue
             erp_card = page.get_by_text("ERP Digital", exact=True).last
             if en_portal and await erp_card.count() > 0:
                 log_fn("  Aún en portal; reintentando clic en ERP Digital...")
