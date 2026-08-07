@@ -49,6 +49,12 @@ try:
 except ImportError:
     _tiene_packs = False
 
+try:
+    import updater
+    _tiene_updater = True
+except ImportError:
+    _tiene_updater = False
+
 
 # ── Utilidades de pantalla ─────────────────────────────────
 def clear():
@@ -241,7 +247,7 @@ async def run_upload():
         lambda: _tiene_upload,
         upload_precios.subir_precios
     )
-    if _tiene_upload:
+    if ok and _tiene_upload:
         ruta = getattr(upload_precios, "ULTIMO_EXCEL_USADO", None)
         if ruta:
             try:
@@ -251,6 +257,8 @@ async def run_upload():
                     print(f"  Archivo eliminado: {path.name}")
             except Exception as e:
                 print(f"  No se pudo eliminar el Excel usado: {e}")
+    elif not ok and _tiene_upload:
+        print("  ⚠️   Upload Precios falló: se conserva el Excel para reintentar manualmente.")
     return ok
 
 
@@ -642,6 +650,38 @@ async def modo_automatico():
 
 
 
+# ── Auto-actualización (solo .exe, solo modo interactivo) ──
+def verificar_actualizacion():
+    if not _tiene_updater:
+        return
+    info = updater.buscar_release_nuevo(APP_VERSION)
+    if not info:
+        return
+
+    print()
+    print("  " + "═" * 54)
+    print(f"  🔔  Nueva versión disponible: {info['version']}  (tienes: {APP_VERSION})")
+    if info["notas"]:
+        print("  Notas de la versión:")
+        for linea in info["notas"].splitlines()[:6]:
+            print(f"    {linea}")
+    print("  " + "═" * 54)
+    resp = input("  ¿Descargar e instalar ahora? (s/n): ").strip().lower()
+    if resp != "s":
+        print("  Continuando con la versión actual.\n")
+        return
+
+    try:
+        print("  Descargando actualización...")
+        destino = runtime_path(info["nombre_archivo"])
+        updater.descargar_actualizacion(info["url_descarga"], destino)
+        print("  ✅  Descarga completa. Reiniciando con la nueva versión...")
+        updater.aplicar_actualizacion_y_reiniciar(destino)
+    except Exception as e:
+        print(f"  ❌  No se pudo actualizar: {e}")
+        print("  Continuando con la versión actual.\n")
+
+
 # ── Selector de sucursal ───────────────────────────────────
 def seleccionar_sucursal():
     sucursales = list(_cfg.SUCURSALES.items())
@@ -789,6 +829,8 @@ def editar_credenciales():
 
 # ── Menú principal ─────────────────────────────────────────
 async def menu_principal():
+    if getattr(sys, "frozen", False):
+        verificar_actualizacion()
     while True:
         clear()
         banner()
