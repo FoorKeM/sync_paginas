@@ -62,6 +62,47 @@ class BuscarReleaseNuevoTests(unittest.TestCase):
         )
 
 
+class DescargarActualizacionTests(unittest.TestCase):
+    def test_writes_file_and_reports_cumulative_progress(self):
+        import tempfile
+        from pathlib import Path
+
+        resp = MagicMock()
+        resp.headers = {"Content-Length": "15"}
+        resp.read.side_effect = [b"a" * 10, b"b" * 5, b""]
+        cm = MagicMock()
+        cm.__enter__.return_value = resp
+        cm.__exit__.return_value = False
+
+        progreso = []
+        with tempfile.TemporaryDirectory() as tmp:
+            destino = Path(tmp) / "nuevo.exe"
+            with patch("updater.urllib.request.urlopen", return_value=cm):
+                updater.descargar_actualizacion(
+                    "http://x", destino, progreso_fn=lambda d, t: progreso.append((d, t))
+                )
+            self.assertEqual(destino.read_bytes(), b"a" * 10 + b"b" * 5)
+
+        self.assertEqual(progreso, [(10, 15), (15, 15)])
+
+    def test_progreso_fn_is_optional(self):
+        import tempfile
+        from pathlib import Path
+
+        resp = MagicMock()
+        resp.headers = {}
+        resp.read.side_effect = [b"contenido", b""]
+        cm = MagicMock()
+        cm.__enter__.return_value = resp
+        cm.__exit__.return_value = False
+
+        with tempfile.TemporaryDirectory() as tmp:
+            destino = Path(tmp) / "nuevo.exe"
+            with patch("updater.urllib.request.urlopen", return_value=cm):
+                updater.descargar_actualizacion("http://x", destino)
+            self.assertEqual(destino.read_bytes(), b"contenido")
+
+
 class AplicarActualizacionTests(unittest.TestCase):
     def test_raises_when_not_frozen(self):
         with patch("updater.sys.frozen", create=True, new=False):

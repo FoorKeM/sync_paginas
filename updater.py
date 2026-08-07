@@ -66,15 +66,25 @@ def buscar_release_nuevo(version_actual: str) -> dict | None:
     }
 
 
-def descargar_actualizacion(url: str, destino: Path) -> None:
-    """Descarga el .exe del release al archivo destino."""
+def descargar_actualizacion(url: str, destino: Path, progreso_fn=None) -> None:
+    """Descarga el .exe del release al archivo destino.
+
+    progreso_fn(bytes_descargados, bytes_totales) se llama despues de cada
+    bloque leido, si se entrega. bytes_totales es 0 si el servidor no informo
+    Content-Length.
+    """
     req = urllib.request.Request(url, headers={"User-Agent": "MercadohouseSync-Updater"})
     with urllib.request.urlopen(req, timeout=120) as resp, open(destino, "wb") as f:
+        total = int(resp.headers.get("Content-Length") or 0)
+        descargado = 0
         while True:
             chunk = resp.read(1024 * 256)
             if not chunk:
                 break
             f.write(chunk)
+            descargado += len(chunk)
+            if progreso_fn:
+                progreso_fn(descargado, total)
 
 
 def aplicar_actualizacion_y_reiniciar(nuevo_exe: Path, nombre_final: str) -> None:

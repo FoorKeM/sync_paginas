@@ -672,9 +672,24 @@ def verificar_actualizacion():
         return
 
     try:
-        print("  Descargando actualización...")
         destino = runtime_path(info["nombre_archivo"])
-        updater.descargar_actualizacion(info["url_descarga"], destino)
+        ultimo_pct = {"valor": -1}
+
+        def _progreso(descargado, total):
+            mb_descargado = descargado / (1024 * 1024)
+            if total:
+                pct = int(descargado * 100 / total)
+                if pct == ultimo_pct["valor"]:
+                    return
+                ultimo_pct["valor"] = pct
+                mb_total = total / (1024 * 1024)
+                print(f"\r  Descargando actualización... {pct:3d}%  ({mb_descargado:.1f} / {mb_total:.1f} MB)", end="", flush=True)
+            else:
+                print(f"\r  Descargando actualización... {mb_descargado:.1f} MB", end="", flush=True)
+
+        print("  Descargando actualización...")
+        updater.descargar_actualizacion(info["url_descarga"], destino, progreso_fn=_progreso)
+        print()
         print("  ✅  Descarga completa. Reiniciando con la nueva versión...")
         updater.aplicar_actualizacion_y_reiniciar(destino, info["nombre_archivo"])
     except Exception as e:
