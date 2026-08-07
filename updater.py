@@ -142,18 +142,31 @@ def aplicar_actualizacion_y_reiniciar(nuevo_exe: Path, nombre_final: str) -> Non
         "    goto esperar\r\n"
         ")\r\n"
         f'echo [%date% %time%] Proceso cerrado. Reemplazando archivo... >> "{log_path}"\r\n'
-        f'if /I not "{exe_actual}"=="{exe_destino}" if exist "{exe_actual}" del /F /Q "{exe_actual}" >> "{log_path}" 2>&1\r\n'
+        "set BORRAR_INTENTOS=0\r\n"
+        ":borrar_viejo\r\n"
+        f'if /I "{exe_actual}"=="{exe_destino}" goto mover\r\n'
+        f'if not exist "{exe_actual}" goto mover\r\n'
+        f'del /F /Q "{exe_actual}" >> "{log_path}" 2>&1\r\n'
+        f'if exist "{exe_actual}" (\r\n'
+        "    set /a BORRAR_INTENTOS+=1\r\n"
+        "    if %BORRAR_INTENTOS% lss 5 (\r\n"
+        "        timeout /t 1 /nobreak >NUL\r\n"
+        "        goto borrar_viejo\r\n"
+        "    )\r\n"
+        f'    echo [%date% %time%] ADVERTENCIA: no se pudo borrar el archivo viejo tras 5 intentos. >> "{log_path}"\r\n'
+        ")\r\n"
+        ":mover\r\n"
         f'move /Y "{nuevo_exe}" "{exe_destino}" >> "{log_path}" 2>&1\r\n'
         "if errorlevel 1 (\r\n"
         f'    echo [%date% %time%] ERROR: no se pudo mover el archivo nuevo. >> "{log_path}"\r\n'
         "    goto fin\r\n"
         ")\r\n"
         f'echo [%date% %time%] Archivo reemplazado como {nombre_final}. Reabriendo... >> "{log_path}"\r\n'
-        f'start "" "{exe_destino}"\r\n'
-        f'echo [%date% %time%] Comando start ejecutado. >> "{log_path}"\r\n'
+        f'start "MercadohouseSync" "{exe_destino}"\r\n'
+        f'echo [%date% %time%] Comando start ejecutado (errorlevel %errorlevel%). >> "{log_path}"\r\n'
         ":fin\r\n"
         'del "%~f0"\r\n'
     )
     bat_path.write_text(bat_contenido, encoding="utf-8")
-    subprocess.Popen(["cmd", "/c", str(bat_path)], creationflags=subprocess.CREATE_NO_WINDOW)
+    subprocess.Popen(["cmd", "/c", str(bat_path)], creationflags=subprocess.CREATE_NEW_CONSOLE)
     sys.exit(0)
