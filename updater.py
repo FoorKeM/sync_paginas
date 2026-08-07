@@ -77,24 +77,42 @@ def descargar_actualizacion(url: str, destino: Path) -> None:
             f.write(chunk)
 
 
-def aplicar_actualizacion_y_reiniciar(nuevo_exe: Path) -> None:
-    """Reemplaza el .exe actual por el descargado y reinicia. Termina el proceso actual."""
+def aplicar_actualizacion_y_reiniciar(nuevo_exe: Path, nombre_final: str) -> None:
+    """Reemplaza el .exe actual por el descargado, con el nombre de la version nueva, y reinicia.
+
+    El archivo final queda en la misma carpeta que el .exe actual pero con el
+    nombre del release (ej. MHSync_V1.9.1.exe), no con el nombre viejo. Termina
+    el proceso actual; el reemplazo y el reinicio los hace un .bat auxiliar
+    porque Windows no permite sobrescribir un .exe mientras esta corriendo.
+    """
     if not getattr(sys, "frozen", False):
         raise Exception("La auto-actualizacion solo esta disponible en la version .exe.")
 
     exe_actual = Path(sys.executable).resolve()
+    exe_destino = exe_actual.parent / nombre_final
     bat_path = exe_actual.parent / "_actualizar_mhsync.bat"
+    log_path = exe_actual.parent / "_actualizar_mhsync_log.txt"
     pid_actual = os.getpid()
     bat_contenido = (
         "@echo off\r\n"
+        f'echo [%date% %time%] Esperando cierre de PID {pid_actual}... >> "{log_path}"\r\n'
         ":esperar\r\n"
         f'tasklist /FI "PID eq {pid_actual}" 2>NUL | find "{pid_actual}" >NUL\r\n'
         "if not errorlevel 1 (\r\n"
         "    timeout /t 1 /nobreak >NUL\r\n"
         "    goto esperar\r\n"
         ")\r\n"
-        f'move /Y "{nuevo_exe}" "{exe_actual}" >NUL\r\n'
-        f'start "" "{exe_actual}"\r\n'
+        f'echo [%date% %time%] Proceso cerrado. Reemplazando archivo... >> "{log_path}"\r\n'
+        f'if /I not "{exe_actual}"=="{exe_destino}" if exist "{exe_actual}" del /F /Q "{exe_actual}" >> "{log_path}" 2>&1\r\n'
+        f'move /Y "{nuevo_exe}" "{exe_destino}" >> "{log_path}" 2>&1\r\n'
+        "if errorlevel 1 (\r\n"
+        f'    echo [%date% %time%] ERROR: no se pudo mover el archivo nuevo. >> "{log_path}"\r\n'
+        "    goto fin\r\n"
+        ")\r\n"
+        f'echo [%date% %time%] Archivo reemplazado como {nombre_final}. Reabriendo... >> "{log_path}"\r\n'
+        f'start "" "{exe_destino}"\r\n'
+        f'echo [%date% %time%] Comando start ejecutado. >> "{log_path}"\r\n'
+        ":fin\r\n"
         'del "%~f0"\r\n'
     )
     bat_path.write_text(bat_contenido, encoding="utf-8")

@@ -66,7 +66,34 @@ class AplicarActualizacionTests(unittest.TestCase):
     def test_raises_when_not_frozen(self):
         with patch("updater.sys.frozen", create=True, new=False):
             with self.assertRaises(Exception):
-                updater.aplicar_actualizacion_y_reiniciar(None)
+                updater.aplicar_actualizacion_y_reiniciar(None, "MHSync_V1.9.1.exe")
+
+    def test_bat_script_renames_to_new_version_filename(self):
+        import tempfile
+        from pathlib import Path
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp).resolve()
+            exe_viejo = tmp_dir / "MHSync_V1.9.0.exe"
+            exe_viejo.write_text("viejo", encoding="utf-8")
+            nuevo_exe = tmp_dir / "descarga_temp.exe"
+            nuevo_exe.write_text("nuevo", encoding="utf-8")
+
+            with (
+                patch("updater.sys.frozen", create=True, new=True),
+                patch("updater.sys.executable", str(exe_viejo)),
+                patch("updater.subprocess.Popen") as popen,
+                patch("updater.sys.exit") as exit_mock,
+            ):
+                updater.aplicar_actualizacion_y_reiniciar(nuevo_exe, "MHSync_V1.9.1.exe")
+
+            bat_path = tmp_dir / "_actualizar_mhsync.bat"
+            contenido = bat_path.read_text(encoding="utf-8")
+
+            self.assertIn(str(tmp_dir / "MHSync_V1.9.1.exe"), contenido)
+            self.assertIn(f'del /F /Q "{exe_viejo}"', contenido)
+            popen.assert_called_once()
+            exit_mock.assert_called_once_with(0)
 
 
 if __name__ == "__main__":

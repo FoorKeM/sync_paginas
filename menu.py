@@ -676,7 +676,7 @@ def verificar_actualizacion():
         destino = runtime_path(info["nombre_archivo"])
         updater.descargar_actualizacion(info["url_descarga"], destino)
         print("  ✅  Descarga completa. Reiniciando con la nueva versión...")
-        updater.aplicar_actualizacion_y_reiniciar(destino)
+        updater.aplicar_actualizacion_y_reiniciar(destino, info["nombre_archivo"])
     except Exception as e:
         print(f"  ❌  No se pudo actualizar: {e}")
         print("  Continuando con la versión actual.\n")
