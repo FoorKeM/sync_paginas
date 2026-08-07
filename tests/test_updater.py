@@ -35,9 +35,10 @@ class BuscarReleaseNuevoTests(unittest.TestCase):
         with patch("updater.urllib.request.urlopen", return_value=_fake_response(payload)):
             self.assertIsNone(updater.buscar_release_nuevo("v1.8.2-2026-08-07"))
 
-    def test_returns_none_on_network_error(self):
+    def test_raises_error_consulta_on_network_error(self):
         with patch("updater.urllib.request.urlopen", side_effect=OSError("sin internet")):
-            self.assertIsNone(updater.buscar_release_nuevo("v1.8.2-2026-08-07"))
+            with self.assertRaises(updater.ErrorConsultaActualizacion):
+                updater.buscar_release_nuevo("v1.8.2-2026-08-07")
 
     def test_returns_release_info_when_newer_version_with_exe_available(self):
         payload = {

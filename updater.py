@@ -16,7 +16,11 @@ import urllib.request
 from pathlib import Path
 
 GITHUB_API_LATEST = "https://api.github.com/repos/FoorKeM/sync_paginas/releases/latest"
-REQUEST_TIMEOUT = 6
+REQUEST_TIMEOUT = 12
+
+
+class ErrorConsultaActualizacion(Exception):
+    """Fallo real al consultar GitHub (red, SSL, DNS...), distinto de 'no hay version nueva'."""
 
 
 def _contexto_ssl():
@@ -64,8 +68,10 @@ def buscar_release_nuevo(version_actual: str) -> dict | None:
     """Consulta el ultimo release publico de GitHub.
 
     Devuelve un dict con version/notas/url_descarga/nombre_archivo si hay una
-    version mas nueva con un .exe adjunto, o None si no hay nada nuevo o si
-    la consulta falla (sin internet, GitHub caido, etc.).
+    version mas nueva con un .exe adjunto, o None si no hay ninguna version
+    mas nueva. Lanza ErrorConsultaActualizacion si la consulta en si misma
+    falla (red, SSL, GitHub caido, etc.) para que el llamador pueda avisar
+    en pantalla en vez de fallar en silencio.
     """
     try:
         req = urllib.request.Request(
@@ -76,7 +82,7 @@ def buscar_release_nuevo(version_actual: str) -> dict | None:
             data = json.loads(resp.read().decode("utf-8"))
     except Exception as exc:
         _log_error_red("buscar_release_nuevo", exc)
-        return None
+        raise ErrorConsultaActualizacion(f"{type(exc).__name__}: {exc}") from exc
 
     tag = data.get("tag_name") or ""
     if not tag or _version_tuple(tag) <= _version_tuple(version_actual):

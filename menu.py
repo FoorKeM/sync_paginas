@@ -654,7 +654,11 @@ async def modo_automatico():
 def verificar_actualizacion():
     if not _tiene_updater:
         return
-    info = updater.buscar_release_nuevo(APP_VERSION)
+    try:
+        info = updater.buscar_release_nuevo(APP_VERSION)
+    except updater.ErrorConsultaActualizacion as e:
+        print(f"  ℹ️   No se pudo revisar actualizaciones ({e}).\n")
+        return
     if not info:
         return
 
