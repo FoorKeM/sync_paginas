@@ -172,6 +172,8 @@ def aplicar_actualizacion_y_reiniciar(nuevo_exe: Path, nombre_final: str) -> Non
         f'start "MercadohouseSync" "{exe_destino}"\r\n'
         f'echo [%date% %time%] Comando start ejecutado (errorlevel %errorlevel%). >> "{log_path}"\r\n'
         ":fin\r\n"
+        f'findstr /C:"ERROR" /C:"ADVERTENCIA" "{log_path}" >NUL\r\n'
+        f'if errorlevel 1 del /F /Q "{log_path}"\r\n'
         'del "%~f0"\r\n'
     )
     bat_path.write_text(bat_contenido, encoding="utf-8")
