@@ -21,6 +21,7 @@ from playwright.async_api import async_playwright
 import config as _cfg
 from utils import (
     asegurar_empresa_mercadohouse,
+    asegurar_punto_ventas_abierto,
     click_y_capturar_pagina,
     crear_logger,
     crear_pagina_trabajo,
@@ -377,55 +378,6 @@ def buscar_excel_mas_reciente(carpeta: str) -> Path:
         sys.exit(1)
     archivos.sort(key=lambda f: f.stat().st_mtime, reverse=True)
     return archivos[0]
-
-
-async def asegurar_punto_ventas_abierto(context, page, log_fn):
-    """Abre Tivendo POS desde portal y verifica que no seguimos en el dashboard."""
-    if "portal.defontana.com" not in page.url:
-        return page
-
-    log_fn("Portal detectado. Haciendo clic en 'Punto de Ventas'...")
-    pos_page, nueva_pestana = await click_y_capturar_pagina(
-        context,
-        page,
-        page.get_by_text("Punto de Ventas", exact=True).last,
-        timeout=6000,
-    )
-    log_fn("Punto de Ventas abrio en pestana nueva" if nueva_pestana else "Punto de Ventas navego en la misma pestana")
-    await esperar_carga_ligera(pos_page)
-
-    limite = asyncio.get_event_loop().time() + 30
-    while asyncio.get_event_loop().time() < limite:
-        if "tivendoapp.defontana.com" in pos_page.url and "portal.defontana.com" not in pos_page.url:
-            log_fn(f"✓ Dentro de Tivendo POS — URL: {pos_page.url}")
-            return pos_page
-
-        try:
-            if await pos_page.get_by_text("Artículos", exact=False).first.is_visible(timeout=1000):
-                log_fn(f"✓ Dentro de Tivendo POS — URL: {pos_page.url}")
-                return pos_page
-        except Exception:
-            pass
-
-        if "portal.defontana.com" in pos_page.url:
-            try:
-                log_fn("  Aun en portal; reintentando clic en Punto de Ventas...")
-                nuevo_page, nueva = await click_y_capturar_pagina(
-                    context,
-                    pos_page,
-                    pos_page.get_by_text("Punto de Ventas", exact=True).last,
-                    timeout=4000,
-                )
-                pos_page = nuevo_page
-                if nueva:
-                    log_fn("  Punto de Ventas abrio en una nueva pestana")
-                await esperar_carga_ligera(pos_page)
-            except Exception:
-                pass
-
-        await pausa_corta(0.8)
-
-    raise Exception(f"No se pudo abrir Tivendo POS desde el portal. URL actual: {pos_page.url}")
 
 
 async def subir_precios():

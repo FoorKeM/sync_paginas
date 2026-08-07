@@ -20,7 +20,7 @@ configure_playwright_browsers()
 from playwright.async_api import async_playwright
 from utils import (
     asegurar_empresa_mercadohouse,
-    click_y_capturar_pagina,
+    asegurar_punto_ventas_abierto,
     crear_logger,
     crear_pagina_trabajo,
     esperar_carga_ligera,
@@ -116,24 +116,12 @@ async def exportar_packs():
                 await asegurar_empresa_mercadohouse(page, log, TIVENDO_EMAIL, TIVENDO_PASSWORD)
 
             with medidor.etapa("Abrir Punto de Ventas"):
-                log("Haciendo clic en Punto de Ventas...")
-                pos_page, nueva_pestana = await click_y_capturar_pagina(
-                    context,
-                    page,
-                    page.get_by_text("Punto de Ventas"),
-                )
-
-            if nueva_pestana:
-                log("Punto de Ventas abrio en pestana nueva")
-            else:
-                log("Punto de Ventas navego en la misma pestana")
-
-            await pos_page.locator("text=Artículos").first.wait_for(state="visible", timeout=25000)
+                pos_page = await asegurar_punto_ventas_abierto(context, page, log)
             log(f"En Punto de Ventas: {pos_page.url}")
 
             with medidor.etapa("Abrir Packs"):
                 log("Navegando a Articulos > Packs...")
-                await pos_page.locator("text=Artículos").first.click()
+                await pos_page.get_by_text("Artículos", exact=True).first.click()
                 await pos_page.get_by_role("link", name="Packs", exact=True).wait_for(
                     state="visible",
                     timeout=10000,

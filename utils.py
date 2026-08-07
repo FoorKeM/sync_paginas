@@ -314,6 +314,61 @@ async def click_y_capturar_pagina(context, page, locator, timeout: int = 3500):
         return page, False
 
 
+async def asegurar_punto_ventas_abierto(context, page, log_fn):
+    """Abre Tivendo POS desde el portal y verifica que la navegacion realmente ocurrio.
+
+    Sin esta verificacion, un clic en 'Punto de Ventas' que no navega a tiempo deja
+    la pagina en el portal; un locator de texto no exacto para 'Articulos' puede dar
+    falso positivo ahi (el portal tiene 'Revisa articulos de ayuda...' en el pie de
+    pagina), haciendo creer que ya se entro a Tivendo POS cuando no es asi.
+    """
+    if "portal.defontana.com" not in page.url:
+        return page
+
+    log_fn("Portal detectado. Haciendo clic en 'Punto de Ventas'...")
+    pos_page, nueva_pestana = await click_y_capturar_pagina(
+        context,
+        page,
+        page.get_by_text("Punto de Ventas", exact=True).last,
+        timeout=6000,
+    )
+    log_fn("Punto de Ventas abrio en pestana nueva" if nueva_pestana else "Punto de Ventas navego en la misma pestana")
+    await esperar_carga_ligera(pos_page)
+
+    limite = asyncio.get_event_loop().time() + 30
+    while asyncio.get_event_loop().time() < limite:
+        if "tivendoapp.defontana.com" in pos_page.url and "portal.defontana.com" not in pos_page.url:
+            log_fn(f"✓ Dentro de Tivendo POS — URL: {pos_page.url}")
+            return pos_page
+
+        try:
+            if await pos_page.get_by_text("Artículos", exact=True).first.is_visible(timeout=1000):
+                log_fn(f"✓ Dentro de Tivendo POS — URL: {pos_page.url}")
+                return pos_page
+        except Exception:
+            pass
+
+        if "portal.defontana.com" in pos_page.url:
+            try:
+                log_fn("  Aun en portal; reintentando clic en Punto de Ventas...")
+                nuevo_page, nueva = await click_y_capturar_pagina(
+                    context,
+                    pos_page,
+                    pos_page.get_by_text("Punto de Ventas", exact=True).last,
+                    timeout=4000,
+                )
+                pos_page = nuevo_page
+                if nueva:
+                    log_fn("  Punto de Ventas abrio en una nueva pestana")
+                await esperar_carga_ligera(pos_page)
+            except Exception:
+                pass
+
+        await pausa_corta(0.8)
+
+    raise Exception(f"No se pudo abrir Tivendo POS desde el portal. URL actual: {pos_page.url}")
+
+
 async def ir_a_importadores_mercadohouse(page, nombre_tab: str, log_fn) -> None:
     """Navega en Mercadohouse hasta Configuracion > Importadores > tab indicada."""
     log_fn("Navegando a ConfiguraciÃ³n...")
