@@ -134,6 +134,7 @@ def aplicar_actualizacion_y_reiniciar(nuevo_exe: Path, nombre_final: str) -> Non
     pid_actual = os.getpid()
     bat_contenido = (
         "@echo off\r\n"
+        "setlocal enabledelayedexpansion\r\n"
         f'echo [%date% %time%] Esperando cierre de PID {pid_actual}... >> "{log_path}"\r\n'
         ":esperar\r\n"
         f'tasklist /FI "PID eq {pid_actual}" 2>NUL | find "{pid_actual}" >NUL\r\n'
@@ -149,11 +150,11 @@ def aplicar_actualizacion_y_reiniciar(nuevo_exe: Path, nombre_final: str) -> Non
         f'del /F /Q "{exe_actual}" >> "{log_path}" 2>&1\r\n'
         f'if exist "{exe_actual}" (\r\n'
         "    set /a BORRAR_INTENTOS+=1\r\n"
-        "    if %BORRAR_INTENTOS% lss 5 (\r\n"
+        "    if !BORRAR_INTENTOS! lss 5 (\r\n"
         "        timeout /t 1 /nobreak >NUL\r\n"
         "        goto borrar_viejo\r\n"
         "    )\r\n"
-        f'    echo [%date% %time%] ADVERTENCIA: no se pudo borrar el archivo viejo tras 5 intentos. >> "{log_path}"\r\n'
+        f'    echo [%date% %time%] ADVERTENCIA: no se pudo borrar el archivo viejo tras !BORRAR_INTENTOS! intentos. >> "{log_path}"\r\n'
         ")\r\n"
         ":mover\r\n"
         f'move /Y "{nuevo_exe}" "{exe_destino}" >> "{log_path}" 2>&1\r\n'
