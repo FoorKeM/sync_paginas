@@ -8,14 +8,42 @@ en modo desarrollo (python menu.py) el chequeo se omite en menu.py.
 
 import json
 import os
+import ssl
 import subprocess
 import sys
-import urllib.error
+import traceback
 import urllib.request
 from pathlib import Path
 
 GITHUB_API_LATEST = "https://api.github.com/repos/FoorKeM/sync_paginas/releases/latest"
 REQUEST_TIMEOUT = 6
+
+
+def _contexto_ssl():
+    """Contexto SSL con el bundle de certifi.
+
+    PyInstaller no siempre logra que el .exe congelado use el almacen de
+    certificados de Windows via el modulo ssl (aunque en modo desarrollo
+    funciona perfecto); certifi empaqueta su propio cacert.pem y evita
+    depender de eso.
+    """
+    try:
+        import certifi
+        return ssl.create_default_context(cafile=certifi.where())
+    except Exception:
+        return ssl.create_default_context()
+
+
+def _log_error_red(origen: str, exc: Exception) -> None:
+    """Deja rastro de fallos de red del actualizador para poder diagnosticarlos despues."""
+    try:
+        from app_paths import RUNTIME_DIR
+        log_path = RUNTIME_DIR / "updater_debug.log"
+        with open(log_path, "a", encoding="utf-8") as f:
+            f.write(f"--- {origen} ---\n")
+            f.write("".join(traceback.format_exception(type(exc), exc, exc.__traceback__)))
+    except Exception:
+        pass
 
 
 def _version_tuple(version_str: str) -> tuple[int, int, int]:
@@ -44,9 +72,10 @@ def buscar_release_nuevo(version_actual: str) -> dict | None:
             GITHUB_API_LATEST,
             headers={"Accept": "application/vnd.github+json", "User-Agent": "MercadohouseSync-Updater"},
         )
-        with urllib.request.urlopen(req, timeout=REQUEST_TIMEOUT) as resp:
+        with urllib.request.urlopen(req, timeout=REQUEST_TIMEOUT, context=_contexto_ssl()) as resp:
             data = json.loads(resp.read().decode("utf-8"))
-    except Exception:
+    except Exception as exc:
+        _log_error_red("buscar_release_nuevo", exc)
         return None
 
     tag = data.get("tag_name") or ""
@@ -74,7 +103,7 @@ def descargar_actualizacion(url: str, destino: Path, progreso_fn=None) -> None:
     Content-Length.
     """
     req = urllib.request.Request(url, headers={"User-Agent": "MercadohouseSync-Updater"})
-    with urllib.request.urlopen(req, timeout=120) as resp, open(destino, "wb") as f:
+    with urllib.request.urlopen(req, timeout=120, context=_contexto_ssl()) as resp, open(destino, "wb") as f:
         total = int(resp.headers.get("Content-Length") or 0)
         descargado = 0
         while True:
