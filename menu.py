@@ -562,15 +562,14 @@ def programar_para_hoy():
             print(f"  ✅  Listo. El ciclo correrá hoy a las {hora_fmt}.")
             print(f"  📄  Excel: {Path(excel_elegido).name}")
             if apagar:
-                print(f"      El equipo se apagará apenas termine (solo si termina sin errores).")
+                print(f"      El equipo se apagará de inmediato y a la fuerza apenas termine")
+                print(f"      (solo si termina sin errores), sin aviso previo.")
             print(f"      Faltan aproximadamente {mins_restantes} minutos.")
             print(f"      Puedes cerrar esta ventana, el PC hará el resto.")
             print()
             print("  ℹ️   Para cancelar antes de que corra:")
             print('       Abre CMD como Administrador y escribe:')
             print('       schtasks /Delete /TN "SyncMercadohouseHoy" /F')
-            if apagar:
-                print('       Para cancelar solo el apagado:  shutdown /a')
         else:
             print(f"  ❌  Error: {r.stderr or r.stdout}")
             print("  → Ejecuta INICIAR.bat como Administrador.")
@@ -580,8 +579,8 @@ def programar_para_hoy():
 
 # ── Modo --auto (llamado por la tarea de Windows) ──────────
 def solicitar_apagado_windows(log_auto, ts):
-    # /s = apagar  /f = forzar cierre de apps  /t 60 = 1 minuto de gracia
-    r = subprocess.run(["shutdown", "/s", "/f", "/t", "60"], capture_output=True, text=True)
+    # /s = apagar  /f = forzar cierre de apps sin guardar  /t 0 = inmediato, sin aviso ni espera
+    r = subprocess.run(["shutdown", "/s", "/f", "/t", "0"], capture_output=True, text=True)
     with open(log_auto, "a", encoding="utf-8") as f:
         if r.returncode == 0:
             f.write(f"[{ts}] Comando shutdown enviado correctamente\n")
@@ -627,11 +626,10 @@ async def modo_automatico():
         if todos_ok:
             print()
             print("  " + "═" * 54)
-            print("  💤  Apagando el equipo en 60 segundos...")
-            print("  ℹ️   Para cancelar escribe en CMD:  shutdown /a")
+            print("  💤  Apagando el equipo ahora (forzado)...")
             print("  " + "═" * 54)
             with open(log_auto, "a", encoding="utf-8") as f:
-                f.write(f"[{ts2}] Apagado programado en 60 segundos\n")
+                f.write(f"[{ts2}] Apagado forzado inmediato solicitado\n")
             if not solicitar_apagado_windows(log_auto, ts2):
                 print("  âš ï¸   Windows rechazo el comando de apagado. Revisa log_automatico.txt.")
         else:

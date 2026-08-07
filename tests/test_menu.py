@@ -83,7 +83,7 @@ class MenuCredentialTests(unittest.TestCase):
     def test_solicitar_apagado_windows_sends_shutdown_command(self):
         with TemporaryDirectory() as tmp, patch("menu.subprocess.run") as run:
             run.return_value = CompletedProcess(
-                ["shutdown", "/s", "/f", "/t", "60"],
+                ["shutdown", "/s", "/f", "/t", "0"],
                 0,
                 "",
                 "",
@@ -93,7 +93,7 @@ class MenuCredentialTests(unittest.TestCase):
 
         self.assertTrue(ok)
         run.assert_called_once_with(
-            ["shutdown", "/s", "/f", "/t", "60"],
+            ["shutdown", "/s", "/f", "/t", "0"],
             capture_output=True,
             text=True,
         )
