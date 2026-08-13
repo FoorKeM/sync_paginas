@@ -361,6 +361,10 @@ async def sincronizar():
 
     log("=" * 55)
     log("INICIO SINCRONIZACIÓN TIVENDO → MERCADOHOUSE")
+    suc_activa = _cfg.sucursal_activa()
+    log(f"🏬 Sucursal activa : {suc_activa['nombre']}")
+    log(f"   Lista Tivendo   : {suc_activa['tivendo_lista_erp']}")
+    log(f"   Local Mercadohouse : {suc_activa['mh_local']}")
     log("=" * 55)
 
     # Crear carpeta de descarga si no existe

@@ -10,6 +10,8 @@ Flujo completo:
 """
 
 import asyncio
+import os
+import re
 import sys
 import zipfile
 import xml.etree.ElementTree as ET
@@ -50,6 +52,10 @@ MOSTRAR_NAVEGADOR = False
 EXCEL_FORZADO: str | None = None
 # ============================================================
 
+# Código de salida especial: el Excel no tiene el formato que espera Tivendo.
+# No tiene sentido reintentar (el archivo seguirá mal), así que menu.py no debe reintentar con este código.
+CODIGO_SALIDA_FORMATO_INVALIDO = 2
+
 LOG_FILE = runtime_path("log_subida.txt")
 log = crear_logger(LOG_FILE)
 ULTIMO_RESULTADO_PRECIOS: dict | None = None
@@ -57,8 +63,21 @@ ULTIMO_EXCEL_USADO: str | None = None
 ULTIMOS_PRECIOS_CONFIRMADOS: dict[str, int] = {}
 
 
+def _col_letras_a_indice(letras: str) -> int:
+    """Convierte la letra de columna de Excel a índice base 0: 'A' -> 0, 'B' -> 1, 'AA' -> 26."""
+    idx = 0
+    for ch in letras.upper():
+        idx = idx * 26 + (ord(ch) - ord("A") + 1)
+    return idx - 1
+
+
 def resumen_excel_precios(excel_path: Path) -> tuple[int, list[list[str]]]:
-    """Lee todas las filas del xlsx sin depender de librerias externas."""
+    """Lee todas las filas del xlsx sin depender de librerias externas.
+
+    Excel omite las celdas vacías del XML, así que hay que ubicar cada celda
+    por su columna real (atributo 'r', ej. 'C5') en vez de por su posición en
+    la lista — si no, una celda vacía al inicio de la fila desalinea todo el resto.
+    """
     ns = {"main": "http://schemas.openxmlformats.org/spreadsheetml/2006/main"}
     with zipfile.ZipFile(excel_path) as zf:
         shared = []
@@ -73,16 +92,24 @@ def resumen_excel_precios(excel_path: Path) -> tuple[int, list[list[str]]]:
         filas = root.findall(".//main:sheetData/main:row", ns)
         datos = []
         for row in filas:
-            valores = []
+            celdas: dict[int, str] = {}
+            col_max = -1
             for cell in row.findall("main:c", ns):
+                col_letras = "".join(ch for ch in cell.attrib.get("r", "") if ch.isalpha())
+                col_idx = _col_letras_a_indice(col_letras) if col_letras else col_max + 1
                 tipo = cell.attrib.get("t")
-                value = cell.find("main:v", ns)
-                texto = "" if value is None or value.text is None else value.text
-                if tipo == "s" and texto.isdigit():
-                    idx = int(texto)
-                    texto = shared[idx] if idx < len(shared) else texto
-                valores.append(texto.strip() if isinstance(texto, str) else texto)
-            datos.append(valores)
+                if tipo == "inlineStr":
+                    is_el = cell.find("main:is", ns)
+                    texto = "" if is_el is None else "".join(t.text or "" for t in is_el.findall(".//main:t", ns))
+                else:
+                    value = cell.find("main:v", ns)
+                    texto = "" if value is None or value.text is None else value.text
+                    if tipo == "s" and texto.isdigit():
+                        idx = int(texto)
+                        texto = shared[idx] if idx < len(shared) else texto
+                celdas[col_idx] = texto.strip() if isinstance(texto, str) else texto
+                col_max = max(col_max, col_idx)
+            datos.append([celdas.get(i, "") for i in range(col_max + 1)])
         return max(0, len(datos) - 1), datos
 
 
@@ -103,6 +130,153 @@ def describir_cambio_precio(fila: list[str]) -> str:
     if rango_ini_2 or rango_fin_2 or precio_2:
         partes.append(f"Rango 2: {rango_ini_2}-{rango_fin_2} | Precio 2: {precio_2}")
     return " | ".join(partes)
+
+
+ENCABEZADO_ESPERADO = ["CODIGO", "RANGOINICIAL1", "RANGOFINAL1", "PRECIO1", "RANGOINICIAL2", "RANGOFINAL2", "PRECIO2"]
+
+
+def _normalizar_encabezado(texto: str) -> str:
+    """Quita tildes/espacios para comparar encabezados sin depender de la codificación exacta."""
+    import unicodedata
+    sin_tildes = unicodedata.normalize("NFKD", texto).encode("ascii", "ignore").decode("ascii")
+    return re.sub(r"[^A-Z0-9]", "", sin_tildes.upper())
+
+
+def validar_encabezado_precios(filas_excel: list[list[str]]) -> list[str]:
+    """Verifica que la primera fila tenga los encabezados que espera Tivendo.
+
+    Un encabezado corrupto (ej. 'C—digo' en vez de 'Código', típico de un
+    problema de codificación al generar el archivo) puede hacer que Tivendo
+    no reconozca la columna y falle o cargue datos en el campo equivocado.
+    """
+    if not filas_excel:
+        return ["El archivo está vacío, no tiene ni encabezado"]
+
+    encabezado = filas_excel[0]
+    errores = []
+    for col, esperado in enumerate(ENCABEZADO_ESPERADO):
+        valor_crudo = _valor_fila(encabezado, col)
+        if _normalizar_encabezado(valor_crudo) != esperado:
+            errores.append(
+                f"Encabezado columna {col + 1}: dice {valor_crudo!r}, "
+                f"debería decir '{describir_encabezado(esperado)}' — revisa cómo se genera el archivo"
+            )
+    return errores
+
+
+ENCABEZADOS_LEGIBLES = {
+    "CODIGO": "Código",
+    "RANGOINICIAL1": "RangoInicial1",
+    "RANGOFINAL1": "RangoFinal1",
+    "PRECIO1": "Precio1",
+    "RANGOINICIAL2": "RangoInicial2",
+    "RANGOFINAL2": "RangoFinal2",
+    "PRECIO2": "Precio2",
+}
+
+
+def describir_encabezado(clave: str) -> str:
+    return ENCABEZADOS_LEGIBLES.get(clave, clave)
+
+
+def _indice_a_col_letras(idx: int) -> str:
+    """Inverso de _col_letras_a_indice: 0 -> 'A', 1 -> 'B', 26 -> 'AA'."""
+    idx += 1
+    letras = ""
+    while idx > 0:
+        idx, resto = divmod(idx - 1, 26)
+        letras = chr(65 + resto) + letras
+    return letras
+
+
+def corregir_encabezado_excel(excel_path: Path, encabezado_actual: list[str]) -> bool:
+    """Corrige en el mismo archivo las celdas del encabezado que no coincidan con lo
+    que espera Tivendo (ej. un símbolo raro en vez de 'Código' por un problema de
+    codificación al generar el archivo). Solo toca esas celdas puntuales de la fila 1,
+    nunca las filas de datos. Devuelve True si corrigió algo.
+    """
+    referencias_a_corregir: dict[str, str] = {}
+    for col_idx, esperado in enumerate(ENCABEZADO_ESPERADO):
+        actual = encabezado_actual[col_idx] if col_idx < len(encabezado_actual) else ""
+        if _normalizar_encabezado(actual) != esperado:
+            ref = f"{_indice_a_col_letras(col_idx)}1"
+            referencias_a_corregir[ref] = describir_encabezado(esperado)
+
+    if not referencias_a_corregir:
+        return False
+
+    sheet_name = "xl/worksheets/sheet1.xml"
+    with zipfile.ZipFile(excel_path) as zf:
+        sheet_xml = zf.read(sheet_name).decode("utf-8")
+
+    for ref, texto_nuevo in referencias_a_corregir.items():
+        patron = re.compile(
+            rf'<c\s+[^>]*?r="{ref}"[^>]*?/>|<c\s+[^>]*?r="{ref}"[^>]*?>.*?</c>'
+        )
+        reemplazo = f'<c r="{ref}" t="inlineStr"><is><t>{texto_nuevo}</t></is></c>'
+        sheet_xml, encontrado = patron.subn(reemplazo, sheet_xml, count=1)
+        if not encontrado:
+            return False  # no se encontró la celda tal cual se esperaba; no arriesgar una reescritura parcial
+
+    tmp_path = excel_path.with_name(f".{excel_path.stem}_tmp{excel_path.suffix}")
+    with zipfile.ZipFile(excel_path) as zf_in, zipfile.ZipFile(tmp_path, "w", zipfile.ZIP_DEFLATED) as zf_out:
+        for item in zf_in.infolist():
+            datos = zf_in.read(item.filename)
+            if item.filename == sheet_name:
+                datos = sheet_xml.encode("utf-8")
+            zf_out.writestr(item, datos)
+    os.replace(tmp_path, excel_path)
+    return True
+
+
+def validar_estructura_precios(filas_excel: list[list[str]]) -> list[str]:
+    """Verifica que el Excel siga el formato que espera Tivendo:
+    codigo, rangoInicial1, rangoFinal1, precio1, [rangoInicial2, rangoFinal2, precio2].
+    Devuelve una lista de errores; vacía si el archivo está bien hecho.
+    """
+    errores: list[str] = []
+    codigos_vistos: set[str] = set()
+
+    for idx, fila in enumerate(filas_excel[1:], start=1):
+        codigo = _valor_fila(fila, 0).lstrip("'").strip().upper()
+        rango_ini_1 = _valor_fila(fila, 1)
+        rango_fin_1 = _valor_fila(fila, 2)
+        precio_1 = _valor_fila(fila, 3)
+        rango_ini_2 = _valor_fila(fila, 4)
+        rango_fin_2 = _valor_fila(fila, 5)
+        precio_2 = _valor_fila(fila, 6)
+        if not codigo:
+            continue  # fila sin código (leyenda/basura): Tivendo la ignora, no se valida
+
+        etiqueta = f"Fila {idx} ({codigo})"
+
+        if not re.match(r"^[A-Z]\d+$", codigo):
+            errores.append(f"{etiqueta}: código con formato inválido, debe ser una letra seguida de números (ej. A001696 artículo, P002281 pack)")
+            continue
+        if codigo in codigos_vistos:
+            errores.append(f"{etiqueta}: código repetido en el archivo")
+        codigos_vistos.add(codigo)
+
+        if not (rango_ini_1.isdigit() and rango_fin_1.isdigit()):
+            errores.append(f"{etiqueta}: Rango 1 no es numérico ({rango_ini_1}-{rango_fin_1})")
+        elif int(rango_ini_1) > int(rango_fin_1):
+            errores.append(f"{etiqueta}: Rango 1 invertido ({rango_ini_1}-{rango_fin_1})")
+
+        if not precio_1.isdigit() or int(precio_1) <= 0:
+            errores.append(f"{etiqueta}: Precio 1 inválido ({precio_1!r})")
+
+        tiene_rango_2 = any([rango_ini_2, rango_fin_2, precio_2])
+        if tiene_rango_2:
+            if not (rango_ini_2.isdigit() and rango_fin_2.isdigit()):
+                errores.append(f"{etiqueta}: Rango 2 no es numérico ({rango_ini_2}-{rango_fin_2})")
+            elif int(rango_ini_2) > int(rango_fin_2):
+                errores.append(f"{etiqueta}: Rango 2 invertido ({rango_ini_2}-{rango_fin_2})")
+            elif rango_fin_1.isdigit() and int(rango_ini_2) <= int(rango_fin_1):
+                errores.append(f"{etiqueta}: Rango 2 se superpone con Rango 1")
+            if not precio_2.isdigit() or int(precio_2) <= 0:
+                errores.append(f"{etiqueta}: Precio 2 inválido ({precio_2!r})")
+
+    return errores
 
 
 def borrar_excel_usado(excel_path: Path) -> None:
@@ -390,6 +564,9 @@ async def subir_precios():
 
     log("=" * 50)
     log("INICIO DEL PROCESO DE SUBIDA A TIVENDO")
+    suc_activa = _cfg.sucursal_activa()
+    log(f"🏬 Sucursal activa   : {suc_activa['nombre']}")
+    log(f"   Lista de precios : {suc_activa['tivendo_lista_erp']}")
     log("=" * 50)
 
     if EXCEL_FORZADO:
@@ -404,15 +581,39 @@ async def subir_precios():
     log(f"Ruta completa        : {excel_path}")
     log(f"Tamaño               : {excel_path.stat().st_size} bytes")
     log(f"Modificado           : {datetime.fromtimestamp(excel_path.stat().st_mtime).strftime('%Y-%m-%d %H:%M')}")
-    filas_excel = []
     try:
         total_filas, filas_excel = resumen_excel_precios(excel_path)
-        log(f"Filas de precios     : {total_filas}")
-        log("Cambios de precios a subir:")
-        for idx, fila in enumerate(filas_excel[1:], start=1):
-            log(f"  {idx:02d}. {describir_cambio_precio(fila)}")
     except Exception as e:
-        log(f"⚠️  No se pudo leer resumen del Excel: {e}")
+        log(f"❌ ERROR: El archivo no se pudo leer, no tiene el formato esperado por Tivendo: {e}")
+        sys.exit(CODIGO_SALIDA_FORMATO_INVALIDO)
+
+    log(f"Filas de precios     : {total_filas}")
+
+    avisos_encabezado = validar_encabezado_precios(filas_excel)
+    if avisos_encabezado:
+        log(f"⚠️  Encabezado con {len(avisos_encabezado)} inconsistencia(s):")
+        for aviso in avisos_encabezado:
+            log(f"  - {aviso}")
+        try:
+            if corregir_encabezado_excel(excel_path, filas_excel[0]):
+                log("✓ Encabezado corregido automáticamente en el archivo antes de subir")
+                total_filas, filas_excel = resumen_excel_precios(excel_path)
+            else:
+                log("⚠️  No se pudo corregir el encabezado automáticamente; se sube igual (no bloquea)")
+        except Exception as e:
+            log(f"⚠️  No se pudo corregir el encabezado automáticamente ({e}); se sube igual (no bloquea)")
+
+    errores_formato = validar_estructura_precios(filas_excel)
+    if errores_formato:
+        log(f"❌ El archivo tiene {len(errores_formato)} error(es) y no se subirá:")
+        for err in errores_formato:
+            log(f"  - {err}")
+        sys.exit(CODIGO_SALIDA_FORMATO_INVALIDO)
+
+    log("✓ Archivo verificado: formato correcto")
+    log("Cambios de precios a subir:")
+    for idx, fila in enumerate(filas_excel[1:], start=1):
+        log(f"  {idx:02d}. {describir_cambio_precio(fila)}")
 
     async with async_playwright() as p:
         browser, context, page = await crear_pagina_trabajo(

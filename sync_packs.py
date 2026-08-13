@@ -94,6 +94,7 @@ async def exportar_packs():
 
     log("=" * 55)
     log("INICIO SYNC PACKS TIVENDO -> MERCADOHOUSE")
+    log("ℹ️ Sincroniza el catálogo completo — no depende de la sucursal activa")
     log("=" * 55)
 
     Path(CARPETA_DESCARGA).mkdir(parents=True, exist_ok=True)

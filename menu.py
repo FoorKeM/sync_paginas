@@ -139,10 +139,18 @@ def banner():
     print()
 
 
-def titulo(txt):
+def titulo(txt, depende_sucursal=None):
+    """depende_sucursal=True muestra la sucursal activa (pasos que suben/leen precios
+    por lista); depende_sucursal=False aclara que el paso no depende de la sucursal
+    (sincroniza el catálogo completo); None no agrega ninguna línea extra."""
     print()
     print("  " + "═" * 54)
     print(f"  ▶  {txt}")
+    if depende_sucursal is True:
+        suc = _cfg.sucursal_activa()
+        print(f"  🏬  Sucursal activa: {suc['nombre']}")
+    elif depende_sucursal is False:
+        print("  ℹ️   Este paso sincroniza el catálogo completo — no depende de la sucursal activa")
     print("  " + "═" * 54)
 
 
@@ -150,35 +158,78 @@ def esperar():
     input("\n  Presiona ENTER para volver al menú...")
 
 
-def elegir_excel_precios_manual():
-    """Abre el selector de archivo para elegir el Excel de precios."""
+def mostrar_resumen_precios_y_confirmar(excel_path: str) -> bool:
+    """Muestra los cambios de precio que trae el Excel elegido (igual que el paso 1
+    en su log) y pide confirmación antes de seguir. Devuelve False si el usuario
+    dice que el archivo no está bien, para que quien llama vuelva a pedirlo."""
+    if not _tiene_upload:
+        return True
+    try:
+        total_filas, filas_excel = upload_precios.resumen_excel_precios(Path(excel_path))
+    except Exception as e:
+        print(f"  ⚠️   No se pudo leer el archivo para mostrar el resumen: {e}")
+        return True  # no se puede previsualizar, pero subir_precios validará antes de subir
+
     print()
     print("  " + "-" * 54)
-    print("  Elige el Excel de precios que se subira en el paso 1.")
-    print("  (Se abrira el explorador de archivos...)")
-    try:
-        import tkinter as tk
-        from tkinter import filedialog
-        _root = tk.Tk()
-        _root.withdraw()
-        _root.wm_attributes("-topmost", True)
-        excel_elegido = filedialog.askopenfilename(
-            title="Selecciona el Excel de precios a subir",
-            filetypes=[("Excel", "*.xlsx"), ("Todos los archivos", "*.*")],
-        )
-        _root.destroy()
-    except Exception as _e:
-        print(f"  No se pudo abrir el selector: {_e}")
-        print("  Cancelado.")
-        return None
+    print(f"  Cambios de precio en el archivo ({total_filas} fila{'s' if total_filas != 1 else ''}):")
+    for idx, fila in enumerate(filas_excel[1:], start=1):
+        print(f"    {idx:02d}. {upload_precios.describir_cambio_precio(fila)}")
 
-    if not excel_elegido:
-        print("  Cancelado. No se eligio ningun archivo.")
-        return None
+    errores = upload_precios.validar_estructura_precios(filas_excel)
+    if errores:
+        print()
+        print(f"  ❌  El archivo tiene {len(errores)} error(es); la subida FALLARÁ:")
+        for err in errores:
+            print(f"    - {err}")
 
-    print(f"  Archivo elegido: {Path(excel_elegido).name}")
+    avisos = upload_precios.validar_encabezado_precios(filas_excel)
+    if avisos and not errores:
+        print()
+        print("  ⚠️   Encabezado con inconsistencias (se corrige solo, no bloquea):")
+        for aviso in avisos:
+            print(f"    - {aviso}")
     print("  " + "-" * 54)
-    return excel_elegido
+
+    resp = input("  ¿Están correctos estos cambios de precio? (s/n): ").strip().lower()
+    return resp == "s"
+
+
+def elegir_excel_precios_manual():
+    """Abre el selector de archivo para elegir el Excel de precios, muestra los
+    cambios de precio que trae y pide confirmación. Si dices que no, vuelve a
+    pedir el archivo."""
+    while True:
+        print()
+        print("  " + "-" * 54)
+        print("  Elige el Excel de precios que se subira en el paso 1.")
+        print("  (Se abrira el explorador de archivos...)")
+        try:
+            import tkinter as tk
+            from tkinter import filedialog
+            _root = tk.Tk()
+            _root.withdraw()
+            _root.wm_attributes("-topmost", True)
+            excel_elegido = filedialog.askopenfilename(
+                title="Selecciona el Excel de precios a subir",
+                filetypes=[("Excel", "*.xlsx"), ("Todos los archivos", "*.*")],
+            )
+            _root.destroy()
+        except Exception as _e:
+            print(f"  No se pudo abrir el selector: {_e}")
+            print("  Cancelado.")
+            return None
+
+        if not excel_elegido:
+            print("  Cancelado. No se eligio ningun archivo.")
+            return None
+
+        print(f"  Archivo elegido: {Path(excel_elegido).name}")
+        print("  " + "-" * 54)
+
+        if mostrar_resumen_precios_y_confirmar(excel_elegido):
+            return excel_elegido
+        print("  Elige el archivo nuevamente...")
 
 
 def imprimir_resumen_upload_precios():
@@ -223,10 +274,14 @@ async def ejecutar_con_reintentos(nombre, fn_check, fn_run):
             os.environ.pop(MODO_LIMPIO_ENV, None)
             return True
         except SystemExit as e:
-            ok = int(str(e)) == 0
-            if ok:
+            codigo = int(str(e))
+            if codigo == 0:
                 os.environ.pop(MODO_LIMPIO_ENV, None)
                 return True
+            if _tiene_upload and codigo == upload_precios.CODIGO_SALIDA_FORMATO_INVALIDO:
+                print(f"  ❌  {nombre}: el archivo de precios no tiene el formato correcto. No se reintentará.")
+                os.environ.pop(MODO_LIMPIO_ENV, None)
+                return False
             if intento < MAX_REINTENTOS:
                 print(f"  ⚠️   Intento {intento} falló, reintentando...")
             else:
@@ -241,7 +296,7 @@ async def ejecutar_con_reintentos(nombre, fn_check, fn_run):
 
 
 async def run_upload():
-    titulo("PASO 1 — Upload Precios → Tivendo POS")
+    titulo("PASO 1 — Upload Precios → Tivendo POS", depende_sucursal=True)
     ok = await ejecutar_con_reintentos(
         "Upload Precios",
         lambda: _tiene_upload,
@@ -279,7 +334,7 @@ async def run_upload_manual_con_excel():
 
 
 async def run_articulos():
-    titulo("PASO 2 — Sync Artículos Tivendo POS → Mercadohouse")
+    titulo("PASO 2 — Sync Artículos Tivendo POS → Mercadohouse", depende_sucursal=False)
     return await ejecutar_con_reintentos(
         "Sync Artículos",
         lambda: _tiene_articulos,
@@ -288,7 +343,7 @@ async def run_articulos():
 
 
 async def run_precios():
-    titulo("PASO 3 — Sync Precios Tivendo ERP → Mercadohouse")
+    titulo("PASO 3 — Sync Precios Tivendo ERP → Mercadohouse", depende_sucursal=True)
     esperados = (
         dict(getattr(upload_precios, "ULTIMOS_PRECIOS_CONFIRMADOS", {}))
         if _tiene_upload
@@ -310,7 +365,7 @@ async def run_precios():
 
 
 async def run_packs():
-    titulo("PASO 4 — Sync Packs Tivendo POS")
+    titulo("PASO 4 — Sync Packs Tivendo POS", depende_sucursal=False)
     return await ejecutar_con_reintentos(
         "Sync Packs",
         lambda: _tiene_packs,
@@ -320,7 +375,7 @@ async def run_packs():
 
 # ── Ciclo completo ─────────────────────────────────────────
 async def run_completo(interactivo=True):
-    titulo("CICLO COMPLETO  1 ➜ 2 ➜ 4 ➜ 3")
+    titulo("CICLO COMPLETO  1 ➜ 2 ➜ 4 ➜ 3", depende_sucursal=True)
     inicio = datetime.now()
     pasos = [
         ("Upload Precios → Tivendo POS",    run_upload),
@@ -379,7 +434,7 @@ async def run_completo_manual_con_excel():
 
 # ── Solo pasos 2 y 3 ──────────────────────────────────────
 async def run_solo_sync():
-    titulo("SYNC MANUAL  2 ➜ 3  (sin upload)")
+    titulo("SYNC MANUAL  2 ➜ 3  (sin upload)", depende_sucursal=True)
     inicio = datetime.now()
     pasos = [
         ("Sync Artículos Tivendo POS → MH", run_articulos),
@@ -413,7 +468,7 @@ async def run_solo_sync():
 
 
 async def run_packs_y_precios():
-    titulo("SYNC PACKS + PRECIOS  4 ➜ 3")
+    titulo("SYNC PACKS + PRECIOS  4 ➜ 3", depende_sucursal=True)
     inicio = datetime.now()
     pasos = [
         ("Sync Packs   Tivendo POS → MH", run_packs),
@@ -447,7 +502,7 @@ async def run_packs_y_precios():
 
 
 async def run_sync_todo():
-    titulo("SYNC TODO  2 ➜ 4 ➜ 3")
+    titulo("SYNC TODO  2 ➜ 4 ➜ 3", depende_sucursal=True)
     inicio = datetime.now()
     pasos = [
         ("Sync Artículos Tivendo POS → MH", run_articulos),
@@ -508,30 +563,35 @@ def programar_para_hoy():
     hora_fmt = f"{int(h):02d}:{int(m):02d}"
 
     # ── Selector de archivo Excel ──────────────────────────
-    print()
-    print("  " + "─" * 54)
-    print("  Elige el Excel de precios que se subirá en el paso 1.")
-    print("  (Se abrirá el explorador de archivos...)")
-    try:
-        import tkinter as tk
-        from tkinter import filedialog
-        _root = tk.Tk()
-        _root.withdraw()
-        _root.wm_attributes("-topmost", True)
-        excel_elegido = filedialog.askopenfilename(
-            title="Selecciona el Excel de precios a subir",
-            filetypes=[("Excel", "*.xlsx"), ("Todos los archivos", "*.*")],
-        )
-        _root.destroy()
-    except Exception as _e:
-        print(f"  ⚠️  No se pudo abrir el selector: {_e}")
-        print("  Cancelado.")
-        return
-    if not excel_elegido:
-        print("  Cancelado. No se eligió ningún archivo.")
-        return
-    print(f"  📄  Archivo elegido: {Path(excel_elegido).name}")
-    print("  " + "─" * 54)
+    while True:
+        print()
+        print("  " + "─" * 54)
+        print("  Elige el Excel de precios que se subirá en el paso 1.")
+        print("  (Se abrirá el explorador de archivos...)")
+        try:
+            import tkinter as tk
+            from tkinter import filedialog
+            _root = tk.Tk()
+            _root.withdraw()
+            _root.wm_attributes("-topmost", True)
+            excel_elegido = filedialog.askopenfilename(
+                title="Selecciona el Excel de precios a subir",
+                filetypes=[("Excel", "*.xlsx"), ("Todos los archivos", "*.*")],
+            )
+            _root.destroy()
+        except Exception as _e:
+            print(f"  ⚠️  No se pudo abrir el selector: {_e}")
+            print("  Cancelado.")
+            return
+        if not excel_elegido:
+            print("  Cancelado. No se eligió ningún archivo.")
+            return
+        print(f"  📄  Archivo elegido: {Path(excel_elegido).name}")
+        print("  " + "─" * 54)
+
+        if mostrar_resumen_precios_y_confirmar(excel_elegido):
+            break
+        print("  Elige el archivo nuevamente...")
 
     # ── Preguntar apagado AQUÍ, antes de confirmar ─────────
     print()

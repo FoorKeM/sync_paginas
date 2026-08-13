@@ -55,6 +55,7 @@ async def sincronizar():
 
     log("=" * 55)
     log("INICIO SINCRONIZACIÓN ARTÍCULOS TIVENDO → MERCADOHOUSE")
+    log("ℹ️ Sincroniza el catálogo completo — no depende de la sucursal activa")
     log("=" * 55)
 
     Path(CARPETA_DESCARGA).mkdir(parents=True, exist_ok=True)
