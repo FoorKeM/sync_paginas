@@ -300,47 +300,6 @@ def borrar_excel_usado(excel_path: Path) -> None:
         log(f"⚠️  No se pudo eliminar el archivo: {_e}")
 
 
-async def esperar_guardado_tivendo(page, log_fn, timeout: int = 60000) -> None:
-    """Espera a que Tivendo termine de guardar antes de cerrar el navegador."""
-    log_fn("Esperando confirmación de guardado en Tivendo...")
-    limite = asyncio.get_event_loop().time() + (timeout / 1000)
-    modal_cerrado_desde = None
-    textos_ok = ("guardado", "importado", "actualizado", "correctamente", "éxito", "exito")
-    textos_error = ("error", "inválido", "invalido", "no se pudo", "falló", "fallo")
-
-    while asyncio.get_event_loop().time() < limite:
-        try:
-            texto = (await page.locator("body").inner_text(timeout=1000)).lower()
-        except Exception:
-            texto = ""
-
-        if any(t in texto for t in textos_error):
-            raise Exception("Tivendo mostró un mensaje de error al guardar precios.")
-
-        guardar_visible = False
-        try:
-            guardar_visible = await page.get_by_role("button", name="Guardar").is_visible(timeout=500)
-        except Exception:
-            guardar_visible = False
-
-        if any(t in texto for t in textos_ok) and not guardar_visible:
-            log_fn("✓ Tivendo confirmó el guardado de precios")
-            return
-
-        if not guardar_visible:
-            if modal_cerrado_desde is None:
-                modal_cerrado_desde = asyncio.get_event_loop().time()
-            elif asyncio.get_event_loop().time() - modal_cerrado_desde >= 3:
-                log_fn("✓ Modal de importación cerrado; guardado finalizado")
-                return
-        else:
-            modal_cerrado_desde = None
-
-        await pausa_corta(0.5)
-
-    raise Exception("Tivendo no confirmó el guardado de precios dentro del tiempo esperado.")
-
-
 async def _leer_pagina_resultado_importacion(page) -> list[dict]:
     return await page.evaluate(
         """

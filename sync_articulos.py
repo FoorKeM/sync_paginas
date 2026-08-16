@@ -13,7 +13,6 @@ Flujo:
 import asyncio
 import sys
 from pathlib import Path
-from datetime import datetime
 from app_paths import runtime_path, configure_playwright_browsers, DESCARGA_DIR
 configure_playwright_browsers()
 from playwright.async_api import async_playwright

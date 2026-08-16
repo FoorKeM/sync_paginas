@@ -3,7 +3,6 @@ config.py — Configuración compartida de sucursal.
 Todos los scripts leen este archivo para saber qué sucursal usar.
 """
 import json
-from pathlib import Path
 from app_paths import DATA_DIR
 
 HERE = DATA_DIR

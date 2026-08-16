@@ -21,7 +21,7 @@ sys.path.insert(0, str(HERE))
 configure_console_encoding()
 configure_playwright_browsers()
 import config as _cfg
-from version import APP_VERSION, APP_NAME
+from version import APP_VERSION
 
 
 # ── Importar los 3 módulos ─────────────────────────────────
