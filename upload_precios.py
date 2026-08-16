@@ -229,9 +229,19 @@ def corregir_encabezado_excel(excel_path: Path, encabezado_actual: list[str]) ->
     return True
 
 
+def _es_numero(texto: str) -> bool:
+    """Acepta enteros y decimales (ej. '0.001' para productos que se venden por kilo)."""
+    try:
+        float(texto)
+        return True
+    except (TypeError, ValueError):
+        return False
+
+
 def validar_estructura_precios(filas_excel: list[list[str]]) -> list[str]:
     """Verifica que el Excel siga el formato que espera Tivendo:
     codigo, rangoInicial1, rangoFinal1, precio1, [rangoInicial2, rangoFinal2, precio2].
+    Los rangos aceptan decimales (productos por kilo, ej. 0.001-1000).
     Devuelve una lista de errores; vacía si el archivo está bien hecho.
     """
     errores: list[str] = []
@@ -257,23 +267,23 @@ def validar_estructura_precios(filas_excel: list[list[str]]) -> list[str]:
             errores.append(f"{etiqueta}: código repetido en el archivo")
         codigos_vistos.add(codigo)
 
-        if not (rango_ini_1.isdigit() and rango_fin_1.isdigit()):
+        if not (_es_numero(rango_ini_1) and _es_numero(rango_fin_1)):
             errores.append(f"{etiqueta}: Rango 1 no es numérico ({rango_ini_1}-{rango_fin_1})")
-        elif int(rango_ini_1) > int(rango_fin_1):
+        elif float(rango_ini_1) > float(rango_fin_1):
             errores.append(f"{etiqueta}: Rango 1 invertido ({rango_ini_1}-{rango_fin_1})")
 
-        if not precio_1.isdigit() or int(precio_1) <= 0:
+        if not _es_numero(precio_1) or float(precio_1) <= 0:
             errores.append(f"{etiqueta}: Precio 1 inválido ({precio_1!r})")
 
         tiene_rango_2 = any([rango_ini_2, rango_fin_2, precio_2])
         if tiene_rango_2:
-            if not (rango_ini_2.isdigit() and rango_fin_2.isdigit()):
+            if not (_es_numero(rango_ini_2) and _es_numero(rango_fin_2)):
                 errores.append(f"{etiqueta}: Rango 2 no es numérico ({rango_ini_2}-{rango_fin_2})")
-            elif int(rango_ini_2) > int(rango_fin_2):
+            elif float(rango_ini_2) > float(rango_fin_2):
                 errores.append(f"{etiqueta}: Rango 2 invertido ({rango_ini_2}-{rango_fin_2})")
-            elif rango_fin_1.isdigit() and int(rango_ini_2) <= int(rango_fin_1):
+            elif _es_numero(rango_fin_1) and float(rango_ini_2) <= float(rango_fin_1):
                 errores.append(f"{etiqueta}: Rango 2 se superpone con Rango 1")
-            if not precio_2.isdigit() or int(precio_2) <= 0:
+            if not _es_numero(precio_2) or float(precio_2) <= 0:
                 errores.append(f"{etiqueta}: Precio 2 inválido ({precio_2!r})")
 
     return errores
