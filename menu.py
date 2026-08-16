@@ -55,6 +55,12 @@ try:
 except ImportError:
     _tiene_updater = False
 
+try:
+    import stock_negativo
+    _tiene_stock_negativo = True
+except ImportError:
+    _tiene_stock_negativo = False
+
 
 # ── Utilidades de pantalla ─────────────────────────────────
 def clear():
@@ -82,6 +88,7 @@ def banner():
     i2 = "✓" if _tiene_articulos else "✗"
     i3 = "✓" if _tiene_precios   else "✗"
     i4 = "✓" if _tiene_packs     else "✗"
+    i10 = "✓" if _tiene_stock_negativo else "✗"
     suc = _cfg.sucursal_activa()
 
     ancho = 60
@@ -128,10 +135,12 @@ def banner():
     opcion("8", "SYNC TODO", "(2 → 4 → 3)")
     opcion("9", "Programar para HOY a la hora que elijas")
     separador()
-    opcion("10", "Cambiar sucursal activa")
-    opcion("11", "Editar credenciales (correos y claves)")
-    opcion("12", "Salir")
-    opcion("13", "Borrar sesion guardada")
+    opcion("10", "Ajustar Stock Negativo", "→ Tivendo", i10)
+    separador()
+    opcion("11", "Cambiar sucursal activa")
+    opcion("12", "Editar credenciales (correos y claves)")
+    opcion("13", "Salir")
+    opcion("14", "Borrar sesion guardada")
     linea("╚", "═", "╝")
     info = tarea_hoy_info()
     if info:
@@ -371,6 +380,45 @@ async def run_packs():
         lambda: _tiene_packs,
         sync_packs.exportar_packs
     )
+
+
+def _confirmar_ajuste_stock_negativo(items, omitidos=None) -> bool:
+    omitidos = omitidos or []
+    if omitidos:
+        print()
+        print(f"  ❌  {len(omitidos)} artículo(s) con stock negativo NO se van a ajustar (revisa y anota manual):")
+        for omitido in omitidos:
+            print(f"    - {omitido['codigo']} | {omitido['descripcion']} | motivo: {omitido['motivo']}")
+    print()
+    print("  " + "-" * 54)
+    print(f"  Artículos con stock negativo a ajustar ({len(items)}):")
+    for idx, item in enumerate(items, start=1):
+        print(
+            f"    {idx:02d}. {item.codigo} | {item.descripcion} | "
+            f"stock: {item.stock_informe} | ajuste: +{item.cantidad_propuesta}"
+        )
+    print("  " + "-" * 54)
+    resp = input("  ¿Aplicar este ajuste en Tivendo? (s/n): ").strip().lower()
+    return resp == "s"
+
+
+async def run_stock_negativo():
+    titulo("PASO 10 — Ajustar Stock Negativo", depende_sucursal=True)
+    if not _tiene_stock_negativo:
+        print("  ❌  Módulo no encontrado para: Ajustar Stock Negativo")
+        return False
+    # No se reintenta automáticamente: un ajuste de inventario que quedó en
+    # duda (guardado_incierto_no_reintentar) NUNCA debe reintentarse solo,
+    # podría duplicar el ajuste. Cualquier falla se revisa a mano.
+    try:
+        ok = await stock_negativo.ejecutar_ajuste_completo(confirmar_fn=_confirmar_ajuste_stock_negativo)
+    except Exception as e:
+        print(f"  ❌  Ajustar Stock Negativo falló: {e}")
+        print("  No se reintenta automáticamente: revisa el diagnóstico antes de volver a intentar.")
+        return False
+    if ok:
+        print("  ✅  Ajustar Stock Negativo completado.")
+    return ok
 
 
 # ── Ciclo completo ─────────────────────────────────────────
@@ -927,7 +975,7 @@ async def menu_principal():
     while True:
         clear()
         banner()
-        op = input("  Elige una opción (1-13): ").strip()
+        op = input("  Elige una opción (1-14): ").strip()
 
         if op == "1":
             await run_upload_manual_con_excel()
@@ -957,15 +1005,18 @@ async def menu_principal():
             programar_para_hoy()
             esperar()
         elif op == "10":
-            seleccionar_sucursal()
+            await run_stock_negativo()
             esperar()
         elif op == "11":
-            editar_credenciales()
+            seleccionar_sucursal()
             esperar()
         elif op == "12":
+            editar_credenciales()
+            esperar()
+        elif op == "13":
             print("\n  Hasta luego!\n")
             break
-        elif op == "13":
+        elif op == "14":
             if borrar_sesion_guardada():
                 print("\n  Sesion guardada borrada. El proximo intento entrara limpio.\n")
             else:

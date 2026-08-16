@@ -5,8 +5,15 @@ from PyInstaller.utils.hooks import collect_data_files, collect_submodules
 
 # Solo se usa playwright.async_api en todo el proyecto (nunca sync_api) —
 # excluirlo reduce lo que hay que extraer/escanear en cada arranque del .exe.
-datas = collect_data_files("playwright") + collect_data_files("certifi")
-hiddenimports = collect_submodules("playwright.async_api") + collect_submodules("playwright._impl") + ["certifi"]
+# openpyxl se agrega para stock_negativo.py (lectura/escritura de Excel con
+# formato, algo mas sofisticado que el parser manual del resto del proyecto).
+datas = collect_data_files("playwright") + collect_data_files("certifi") + collect_data_files("openpyxl")
+hiddenimports = (
+    collect_submodules("playwright.async_api")
+    + collect_submodules("playwright._impl")
+    + collect_submodules("openpyxl")
+    + ["certifi", "et_xmlfile"]
+)
 
 
 a = Analysis(
