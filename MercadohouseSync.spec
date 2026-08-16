@@ -3,8 +3,10 @@
 from PyInstaller.utils.hooks import collect_data_files, collect_submodules
 
 
+# Solo se usa playwright.async_api en todo el proyecto (nunca sync_api) —
+# excluirlo reduce lo que hay que extraer/escanear en cada arranque del .exe.
 datas = collect_data_files("playwright") + collect_data_files("certifi")
-hiddenimports = collect_submodules("playwright") + ["certifi"]
+hiddenimports = collect_submodules("playwright.async_api") + collect_submodules("playwright._impl") + ["certifi"]
 
 
 a = Analysis(
@@ -16,7 +18,7 @@ a = Analysis(
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=[],
+    excludes=["playwright.sync_api"],
     noarchive=False,
     optimize=0,
 )
@@ -32,7 +34,10 @@ exe = EXE(
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
-    upx=True,
+    # UPX comprime el .exe (mas chico en disco) pero obliga a descomprimirlo
+    # entero en CPU cada vez que arranca — eso es lo que causa el "tranco"
+    # al abrir el programa. Sin UPX el arranque es mas liviano para la CPU.
+    upx=False,
     upx_exclude=[],
     runtime_tmpdir=None,
     console=True,
