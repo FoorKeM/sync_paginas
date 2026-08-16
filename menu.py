@@ -537,8 +537,22 @@ async def run_sync_todo():
 
 
 # ── Programar para HOY (tarea única, no repetitiva) ────────
+def _es_administrador() -> bool:
+    try:
+        import ctypes
+        return bool(ctypes.windll.shell32.IsUserAnAdmin())
+    except Exception:
+        return True  # si no se puede saber (ej. no-Windows), no bloquear
+
+
 def programar_para_hoy():
     titulo("PROGRAMAR EJECUCIÓN PARA HOY")
+    if not _es_administrador():
+        print("  ❌  Este paso necesita permisos de administrador.")
+        print("      Cierra el programa y vuelve a abrirlo con 'Ejecutar como administrador'")
+        print("      (clic derecho sobre el .exe). Sin eso, Windows no permite crear la")
+        print("      tarea programada y este paso no puede continuar.")
+        return
     print("  Esto programará el ciclo completo (1→2→4→3) para")
     print("  ejecutarse UNA SOLA VEZ hoy a la hora que elijas.")
     print("  El equipo debe estar encendido a esa hora.")
