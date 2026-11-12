@@ -6,17 +6,105 @@ Solo funciona reemplazando el .exe cuando la app corre congelada (PyInstaller);
 en modo desarrollo (python menu.py) el chequeo se omite en menu.py.
 """
 
+import csv
 import json
 import os
+import re
 import ssl
 import subprocess
 import sys
+import time
 import traceback
 import urllib.request
 from pathlib import Path
 
+from app_paths import DATA_DIR
+
 GITHUB_API_LATEST = "https://api.github.com/repos/FoorKeM/sync_paginas/releases/latest"
 REQUEST_TIMEOUT = 12
+
+
+def otras_versiones_abiertas() -> list[str]:
+    """Nombres de otros ejecutables MHSync activos en esta sesión de Windows."""
+    if os.name != "nt":
+        return []
+    try:
+        result = subprocess.run(
+            ["tasklist", "/FO", "CSV", "/NH"],
+            capture_output=True, text=True, timeout=10,
+        )
+        if result.returncode != 0:
+            return []
+        actual = Path(sys.executable).name.casefold()
+        nombres = {
+            row[0] for row in csv.reader(result.stdout.splitlines())
+            if row and re.fullmatch(r"mhsync(?:_v[0-9.]+)?\.exe", row[0], re.IGNORECASE)
+            and row[0].casefold() != actual
+        }
+        return sorted(nombres, key=str.casefold)
+    except (OSError, subprocess.TimeoutExpired):
+        return []
+
+
+def cerrar_ejecutable(nombre: str) -> bool:
+    """Cierra todas las instancias de un nombre MHSync validado."""
+    if not re.fullmatch(r"MHSync(?:_V[0-9.]+)?\.exe", nombre, re.IGNORECASE):
+        raise ValueError("Nombre de ejecutable MHSync no válido")
+    try:
+        result = subprocess.run(
+            ["taskkill", "/F", "/T", "/IM", nombre],
+            capture_output=True, text=True, timeout=15,
+        )
+        return result.returncode == 0
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+
+
+def limpiar_actualizacion_anterior(app_dir: Path, input_fn=input, print_fn=print) -> None:
+    """Retira el exe viejo y el log que dejó el actualizador anterior al fallar."""
+    app_dir = Path(app_dir).resolve()
+    log_path = app_dir / "_actualizar_mhsync_log.txt"
+    if not log_path.is_file():
+        return
+    try:
+        contenido = log_path.read_text(encoding="utf-8", errors="replace")
+        if "ADVERTENCIA: no se pudo borrar el archivo viejo" not in contenido:
+            return
+        viejo = next(
+            (
+                Path(line.strip()) for line in contenido.splitlines()
+                if re.fullmatch(r"MHSync_V[0-9.]+\.exe", Path(line.strip()).name, re.IGNORECASE)
+                and Path(line.strip()).parent.resolve() == app_dir
+            ),
+            None,
+        )
+        if viejo is None:
+            return
+        if viejo.exists():
+            try:
+                viejo.unlink()
+            except OSError:
+                print_fn(f"  ⚠️  La versión anterior ({viejo.name}) sigue en uso.")
+                try:
+                    respuesta = input_fn("  ¿Cerrar esa versión a la fuerza y limpiar la actualización? (s/n): ").strip().lower()
+                except EOFError:
+                    respuesta = "n"
+                if respuesta != "s":
+                    return
+                cerrar_ejecutable(viejo.name)
+                for _ in range(10):
+                    try:
+                        viejo.unlink()
+                        break
+                    except OSError:
+                        time.sleep(0.5)
+                if viejo.exists():
+                    print_fn(f"  ❌  No se pudo borrar {viejo.name}. Cierra esa versión y vuelve a intentar.")
+                    return
+        log_path.unlink()
+        print_fn("  ✓ Actualización anterior limpiada; quedó solo MHSync.exe.")
+    except OSError as exc:
+        print_fn(f"  ⚠️  No se pudo limpiar la actualización anterior: {exc}")
 
 
 class ErrorConsultaActualizacion(Exception):
@@ -136,12 +224,12 @@ def aplicar_actualizacion_y_reiniciar(nuevo_exe: Path, nombre_final: str) -> Non
     exe_actual = Path(sys.executable).resolve()
     exe_destino = exe_actual.parent / nombre_final
     bat_path = exe_actual.parent / "_actualizar_mhsync.bat"
-    log_path = exe_actual.parent / "_actualizar_mhsync_log.txt"
+    log_path = DATA_DIR / "_actualizar_mhsync_log.txt"
     pid_actual = os.getpid()
     bat_contenido = (
         "@echo off\r\n"
         "setlocal enabledelayedexpansion\r\n"
-        f'echo [%date% %time%] Esperando cierre de PID {pid_actual}... >> "{log_path}"\r\n'
+        f'echo [%date% %time%] Esperando cierre de PID {pid_actual}... > "{log_path}"\r\n'
         ":esperar\r\n"
         f'tasklist /FI "PID eq {pid_actual}" 2>NUL | find "{pid_actual}" >NUL\r\n'
         "if not errorlevel 1 (\r\n"
@@ -160,7 +248,8 @@ def aplicar_actualizacion_y_reiniciar(nuevo_exe: Path, nombre_final: str) -> Non
         "        timeout /t 1 /nobreak >NUL\r\n"
         "        goto borrar_viejo\r\n"
         "    )\r\n"
-        f'    echo [%date% %time%] ADVERTENCIA: no se pudo borrar el archivo viejo tras !BORRAR_INTENTOS! intentos. >> "{log_path}"\r\n'
+        f'    echo [%date% %time%] ERROR: no se pudo borrar el archivo viejo tras !BORRAR_INTENTOS! intentos. Cierra otras ventanas de MHSync. >> "{log_path}"\r\n'
+        "    goto fin\r\n"
         ")\r\n"
         ":mover\r\n"
         f'move /Y "{nuevo_exe}" "{exe_destino}" >> "{log_path}" 2>&1\r\n'

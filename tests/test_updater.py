@@ -1,6 +1,9 @@
 import json
+import os
 import unittest
 from unittest.mock import MagicMock, patch
+from pathlib import Path
+from subprocess import CompletedProcess
 
 import updater
 
@@ -146,8 +149,72 @@ class AplicarActualizacionTests(unittest.TestCase):
 
             self.assertIn(str(tmp_dir / "MHSync.exe"), contenido)
             self.assertIn(f'del /F /Q "{exe_viejo}"', contenido)
+            self.assertIn(str(updater.DATA_DIR / "_actualizar_mhsync_log.txt"), contenido)
+            self.assertIn("goto fin", contenido)
             popen.assert_called_once()
             exit_mock.assert_called_once_with(0)
+
+
+class LimpiezaActualizacionTests(unittest.TestCase):
+    def test_removes_old_exe_and_log_after_legacy_update(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            carpeta = Path(tmp)
+            viejo = carpeta / "MHSync_V1.9.23.exe"
+            viejo.write_bytes(b"antiguo")
+            log = carpeta / "_actualizar_mhsync_log.txt"
+            log.write_text(
+                f"{viejo}\nADVERTENCIA: no se pudo borrar el archivo viejo tras 5 intentos.\n",
+                encoding="utf-8",
+            )
+
+            updater.limpiar_actualizacion_anterior(carpeta, input_fn=lambda _: self.fail("No debe pedir confirmación"))
+
+            self.assertFalse(viejo.exists())
+            self.assertFalse(log.exists())
+
+    def test_asks_before_forcing_closed_old_exe(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            carpeta = Path(tmp)
+            viejo = carpeta / "MHSync_V1.9.23.exe"
+            viejo.write_bytes(b"antiguo")
+            log = carpeta / "_actualizar_mhsync_log.txt"
+            log.write_text(
+                f"{viejo}\nADVERTENCIA: no se pudo borrar el archivo viejo tras 5 intentos.\n",
+                encoding="utf-8",
+            )
+            unlink_real = Path.unlink
+            intentos = {"viejo": 0}
+
+            def unlink_con_bloqueo(path, *args, **kwargs):
+                if path == viejo and intentos["viejo"] == 0:
+                    intentos["viejo"] += 1
+                    raise PermissionError("en uso")
+                return unlink_real(path, *args, **kwargs)
+
+            with patch.object(Path, "unlink", unlink_con_bloqueo), patch(
+                "updater.cerrar_ejecutable", return_value=True,
+            ) as cerrar:
+                updater.limpiar_actualizacion_anterior(carpeta, input_fn=lambda _: "s")
+
+            cerrar.assert_called_once_with(viejo.name)
+            self.assertFalse(viejo.exists())
+            self.assertFalse(log.exists())
+
+    @unittest.skipUnless(os.name == "nt", "tasklist solo existe en Windows")
+    def test_detects_other_open_version_by_process_name(self):
+        salida = '\n'.join((
+            '"MHSync.exe","100","Console","1","10,000 K"',
+            '"MHSync_V1.9.23.exe","200","Console","1","10,000 K"',
+            '"notepad.exe","300","Console","1","10,000 K"',
+        ))
+        with patch("updater.sys.executable", r"C:\Apps\MHSync.exe"), patch(
+            "updater.subprocess.run", return_value=CompletedProcess([], 0, salida, ""),
+        ):
+            self.assertEqual(updater.otras_versiones_abiertas(), ["MHSync_V1.9.23.exe"])
 
 
 if __name__ == "__main__":

@@ -797,6 +797,19 @@ def verificar_actualizacion():
         print("  Continuando con la versión actual.\n")
         return
 
+    otras = updater.otras_versiones_abiertas()
+    if otras:
+        print(f"  ⚠️  Hay otras versiones abiertas: {', '.join(otras)}")
+        cerrar = input("  ¿Cerrarlas a la fuerza antes de actualizar? (s/n): ").strip().lower()
+        if cerrar != "s":
+            print("  Actualización cancelada. Cierra esas versiones e intenta de nuevo.\n")
+            return
+        for nombre in otras:
+            if not updater.cerrar_ejecutable(nombre):
+                print(f"  ❌  No se pudo cerrar {nombre}. Actualización cancelada.\n")
+                return
+        print("  ✓ Versiones anteriores cerradas.")
+
     try:
         destino = runtime_path(info["nombre_archivo"])
         ultimo_pct = {"valor": -1}
@@ -971,6 +984,8 @@ def editar_credenciales():
 # ── Menú principal ─────────────────────────────────────────
 async def menu_principal():
     if getattr(sys, "frozen", False):
+        if _tiene_updater:
+            updater.limpiar_actualizacion_anterior(APP_DIR)
         verificar_actualizacion()
     while True:
         clear()
@@ -1027,8 +1042,37 @@ async def menu_principal():
             await asyncio.sleep(1)
 
 
+def _adquirir_menu_unico() -> bool:
+    """Impide abrir dos menús a la vez en la misma sesión de Windows."""
+    if os.name != "nt":
+        return True
+    import atexit
+    import ctypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.CreateMutexW.argtypes = (ctypes.c_void_p, ctypes.c_int, ctypes.c_wchar_p)
+    kernel32.CreateMutexW.restype = ctypes.c_void_p
+    kernel32.CloseHandle.argtypes = (ctypes.c_void_p,)
+    kernel32.CloseHandle.restype = ctypes.c_int
+    handle = kernel32.CreateMutexW(None, False, "Local\\MercadohouseSyncMenu")
+    if not handle:
+        raise OSError(ctypes.get_last_error(), "No se pudo comprobar la instancia de MHSync")
+    if ctypes.get_last_error() == 183:  # ERROR_ALREADY_EXISTS
+        kernel32.CloseHandle(handle)
+        return False
+    atexit.register(kernel32.CloseHandle, handle)
+    return True
+
+
 if __name__ == "__main__":
     if "--auto" in sys.argv:
         asyncio.run(modo_automatico())
     else:
+        if not _adquirir_menu_unico():
+            print("  MHSync ya está abierto. Cierra la otra ventana antes de iniciarlo otra vez.")
+            try:
+                input("  Presiona ENTER para cerrar esta ventana...")
+            except EOFError:
+                pass
+            sys.exit(0)
         asyncio.run(menu_principal())
