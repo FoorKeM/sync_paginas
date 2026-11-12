@@ -289,6 +289,7 @@ def aplicar_actualizacion_y_reiniciar(nuevo_exe: Path, nombre_final: str) -> Non
 
     exe_actual = Path(sys.executable).resolve()
     exe_destino = exe_actual.parent / nombre_final
+    proceso_esperado = "MHSync.exe" if nombre_final.casefold() == NOMBRE_INSTALADOR_TRANSITORIO.casefold() else nombre_final
     bat_path = exe_actual.parent / "_actualizar_mhsync.bat"
     log_path = DATA_DIR / "_actualizar_mhsync_log.txt"
     pid_actual = os.getpid()
@@ -331,13 +332,22 @@ def aplicar_actualizacion_y_reiniciar(nuevo_exe: Path, nombre_final: str) -> Non
         "    goto fin\r\n"
         ")\r\n"
         f'echo [%date% %time%] Archivo reemplazado como {nombre_final}. Reabriendo... >> "{log_path}"\r\n'
-        f'start "MercadohouseSync" "{exe_destino}"\r\n'
-        f'echo [%date% %time%] Comando start ejecutado (errorlevel %errorlevel%). >> "{log_path}"\r\n'
+        "set REABRIR_INTENTOS=0\r\n"
+        ":reabrir\r\n"
+        "set /a REABRIR_INTENTOS+=1\r\n"
+        f'start "" /D "{exe_destino.parent}" "{exe_destino}"\r\n'
+        "timeout /t 5 /nobreak >NUL\r\n"
+        f'tasklist /FI "IMAGENAME eq {proceso_esperado}" /FO CSV /NH 2>NUL | findstr /I /C:"{proceso_esperado}" >NUL\r\n'
+        "if errorlevel 1 (\r\n"
+        f'    echo [%date% %time%] Intento !REABRIR_INTENTOS!: {proceso_esperado} no quedo abierto. >> "{log_path}"\r\n'
+        "    if !REABRIR_INTENTOS! lss 3 goto reabrir\r\n"
+        f'    echo [%date% %time%] ERROR: {proceso_esperado} no se pudo reabrir tras 3 intentos. >> "{log_path}"\r\n'
+        "    goto fin\r\n"
+        ")\r\n"
+        f'echo [%date% %time%] {proceso_esperado} quedo abierto tras !REABRIR_INTENTOS! intento(s). >> "{log_path}"\r\n'
         ":fin\r\n"
-        f'findstr /C:"ERROR" /C:"ADVERTENCIA" "{log_path}" >NUL\r\n'
-        f'if errorlevel 1 del /F /Q "{log_path}"\r\n'
         'del "%~f0"\r\n'
     )
     bat_path.write_text(bat_contenido, encoding="utf-8")
-    subprocess.Popen(["cmd", "/c", str(bat_path)], creationflags=subprocess.CREATE_NEW_CONSOLE)
+    subprocess.Popen(["cmd", "/c", str(bat_path)], creationflags=subprocess.CREATE_NO_WINDOW)
     sys.exit(0)

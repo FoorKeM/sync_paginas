@@ -152,8 +152,34 @@ class AplicarActualizacionTests(unittest.TestCase):
             self.assertIn(str(updater.DATA_DIR / "_actualizar_mhsync_log.txt"), contenido)
             self.assertIn(":reintentar_mover", contenido)
             self.assertIn("MOVER_INTENTOS! lss 20", contenido)
+            self.assertIn('start "" /D', contenido)
+            self.assertIn('IMAGENAME eq MHSync.exe', contenido)
+            self.assertIn('REABRIR_INTENTOS! lss 3', contenido)
             popen.assert_called_once()
+            self.assertEqual(popen.call_args.kwargs["creationflags"], updater.subprocess.CREATE_NO_WINDOW)
             exit_mock.assert_called_once_with(0)
+
+    def test_transitional_asset_checks_that_final_program_is_running(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            old = root / "MHSync.exe"
+            downloaded = root / "download.tmp"
+            old.write_bytes(b"old")
+            downloaded.write_bytes(b"new")
+            with (
+                patch("updater.sys.frozen", create=True, new=True),
+                patch("updater.sys.executable", str(old)),
+                patch("updater.subprocess.Popen"),
+                patch("updater.sys.exit"),
+            ):
+                updater.aplicar_actualizacion_y_reiniciar(downloaded, "MHSync_Instalar.exe")
+
+            batch = (root / "_actualizar_mhsync.bat").read_text(encoding="utf-8")
+            self.assertIn('start "" /D', batch)
+            self.assertIn('IMAGENAME eq MHSync.exe', batch)
+            self.assertNotIn('IMAGENAME eq MHSync_Instalar.exe', batch)
 
 
 class LimpiezaActualizacionTests(unittest.TestCase):
