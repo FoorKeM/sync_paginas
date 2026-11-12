@@ -1068,6 +1068,22 @@ if __name__ == "__main__":
     if "--auto" in sys.argv:
         asyncio.run(modo_automatico())
     else:
+        if getattr(sys, "frozen", False) and _tiene_updater:
+            if Path(sys.executable).name.casefold() == updater.NOMBRE_INSTALADOR_TRANSITORIO.casefold():
+                try:
+                    updater.finalizar_instalacion_transitoria()
+                except Exception as exc:
+                    print(f"  ❌  No se pudo completar la actualización: {exc}")
+                    try:
+                        input("  Presiona ENTER para cerrar esta ventana...")
+                    except EOFError:
+                        pass
+                    sys.exit(1)
+            elif "--limpiar-instalador" in sys.argv:
+                indice = sys.argv.index("--limpiar-instalador")
+                if indice + 1 < len(sys.argv):
+                    if not updater.limpiar_instalador_transitorio(APP_DIR, Path(sys.argv[indice + 1])):
+                        print("  ⚠️  No se pudo retirar el instalador temporal; puedes borrarlo después.")
         if not _adquirir_menu_unico():
             print("  MHSync ya está abierto. Cierra la otra ventana antes de iniciarlo otra vez.")
             try:

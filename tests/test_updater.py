@@ -150,12 +150,84 @@ class AplicarActualizacionTests(unittest.TestCase):
             self.assertIn(str(tmp_dir / "MHSync.exe"), contenido)
             self.assertIn(f'del /F /Q "{exe_viejo}"', contenido)
             self.assertIn(str(updater.DATA_DIR / "_actualizar_mhsync_log.txt"), contenido)
-            self.assertIn("goto fin", contenido)
+            self.assertIn(":reintentar_mover", contenido)
+            self.assertIn("MOVER_INTENTOS! lss 20", contenido)
             popen.assert_called_once()
             exit_mock.assert_called_once_with(0)
 
 
 class LimpiezaActualizacionTests(unittest.TestCase):
+    def test_transitional_installer_copies_to_stable_name_and_relaunches(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            carpeta = Path(tmp)
+            instalador = carpeta / "MHSync_Instalar.exe"
+            instalador.write_bytes(b"version nueva")
+            (carpeta / "MHSync.exe").write_bytes(b"version antigua")
+            (carpeta / "_actualizar_mhsync_log.txt").write_text("ERROR", encoding="utf-8")
+
+            with (
+                patch("updater.sys.frozen", create=True, new=True),
+                patch("updater.sys.executable", str(instalador)),
+                patch("updater.subprocess.Popen") as popen,
+                patch("updater.sys.exit") as exit_mock,
+            ):
+                updater.finalizar_instalacion_transitoria(input_fn=lambda _: self.fail("No debe pedir confirmación"))
+
+            self.assertEqual((carpeta / "MHSync.exe").read_bytes(), b"version nueva")
+            self.assertFalse((carpeta / "_actualizar_mhsync_log.txt").exists())
+            self.assertEqual(
+                popen.call_args.args[0],
+                [str((carpeta / "MHSync.exe").resolve()), "--limpiar-instalador", str(instalador.resolve())],
+            )
+            exit_mock.assert_called_once_with(0)
+
+    def test_transitional_installer_asks_before_forcing_old_process_closed(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            carpeta = Path(tmp)
+            instalador = carpeta / "MHSync_Instalar.exe"
+            instalador.write_bytes(b"version nueva")
+            viejo = carpeta / "MHSync.exe"
+            viejo.write_bytes(b"version antigua")
+            unlink_real = Path.unlink
+            intento = {"n": 0}
+
+            def unlink_con_bloqueo(path, *args, **kwargs):
+                if path == viejo.resolve() and intento["n"] == 0:
+                    intento["n"] += 1
+                    raise PermissionError("en uso")
+                return unlink_real(path, *args, **kwargs)
+
+            with (
+                patch("updater.sys.frozen", create=True, new=True),
+                patch("updater.sys.executable", str(instalador)),
+                patch.object(Path, "unlink", unlink_con_bloqueo),
+                patch("updater.cerrar_ejecutable", return_value=True) as cerrar,
+                patch("updater.subprocess.Popen"),
+                patch("updater.sys.exit"),
+            ):
+                updater.finalizar_instalacion_transitoria(input_fn=lambda _: "s")
+
+            cerrar.assert_called_once_with("MHSync.exe")
+            self.assertEqual(viejo.read_bytes(), b"version nueva")
+
+    def test_final_exe_removes_transitional_installer_and_old_log(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            carpeta = Path(tmp)
+            instalador = carpeta / "MHSync_Instalar.exe"
+            instalador.write_bytes(b"version nueva")
+            log = carpeta / "_actualizar_mhsync_log.txt"
+            log.write_text("ERROR", encoding="utf-8")
+
+            self.assertTrue(updater.limpiar_instalador_transitorio(carpeta, instalador))
+            self.assertFalse(instalador.exists())
+            self.assertFalse(log.exists())
+
     def test_removes_old_exe_and_log_after_legacy_update(self):
         import tempfile
 

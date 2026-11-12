@@ -10,6 +10,7 @@ import csv
 import json
 import os
 import re
+import shutil
 import ssl
 import subprocess
 import sys
@@ -22,6 +23,7 @@ from app_paths import DATA_DIR
 
 GITHUB_API_LATEST = "https://api.github.com/repos/FoorKeM/sync_paginas/releases/latest"
 REQUEST_TIMEOUT = 12
+NOMBRE_INSTALADOR_TRANSITORIO = "MHSync_Instalar.exe"
 
 
 def otras_versiones_abiertas() -> list[str]:
@@ -105,6 +107,70 @@ def limpiar_actualizacion_anterior(app_dir: Path, input_fn=input, print_fn=print
         print_fn("  ✓ Actualización anterior limpiada; quedó solo MHSync.exe.")
     except OSError as exc:
         print_fn(f"  ⚠️  No se pudo limpiar la actualización anterior: {exc}")
+
+
+def finalizar_instalacion_transitoria(input_fn=input, print_fn=print) -> None:
+    """Convierte el nombre temporal del release en MHSync.exe sin pisar un exe activo."""
+    if not getattr(sys, "frozen", False):
+        raise RuntimeError("La instalación transitoria solo funciona desde el .exe")
+    actual = Path(sys.executable).resolve()
+    if actual.name.casefold() != NOMBRE_INSTALADOR_TRANSITORIO.casefold():
+        raise RuntimeError("No se está ejecutando el instalador transitorio")
+    destino = actual.with_name("MHSync.exe")
+
+    if destino.exists():
+        try:
+            destino.unlink()
+        except OSError:
+            print_fn("  La versión anterior de MHSync sigue abierta o bloqueada.")
+            try:
+                respuesta = input_fn("  ¿Cerrarla a la fuerza para completar la actualización? (s/n): ").strip().lower()
+            except EOFError:
+                respuesta = "n"
+            if respuesta != "s":
+                raise RuntimeError("Cierra MHSync.exe y abre de nuevo MHSync_Instalar.exe")
+            cerrar_ejecutable("MHSync.exe")
+            for _ in range(20):
+                try:
+                    destino.unlink()
+                    break
+                except OSError:
+                    time.sleep(0.5)
+            if destino.exists():
+                raise RuntimeError("Windows aún no permite reemplazar MHSync.exe")
+
+    shutil.copy2(actual, destino)
+    subprocess.Popen(
+        [str(destino), "--limpiar-instalador", str(actual)],
+        creationflags=subprocess.CREATE_NEW_CONSOLE,
+    )
+    log_anterior = actual.parent / "_actualizar_mhsync_log.txt"
+    try:
+        log_anterior.unlink(missing_ok=True)
+    except OSError:
+        pass
+    print_fn("  Actualización instalada como MHSync.exe. Abriendo nueva versión...")
+    sys.exit(0)
+
+
+def limpiar_instalador_transitorio(app_dir: Path, archivo: Path) -> bool:
+    """Borra la copia temporal después de que arranca el MHSync.exe definitivo."""
+    app_dir = Path(app_dir).resolve()
+    archivo = Path(archivo).resolve()
+    if archivo.parent != app_dir or archivo.name.casefold() != NOMBRE_INSTALADOR_TRANSITORIO.casefold():
+        return False
+    for _ in range(60):
+        try:
+            archivo.unlink(missing_ok=True)
+            log_anterior = app_dir / "_actualizar_mhsync_log.txt"
+            try:
+                log_anterior.unlink(missing_ok=True)
+            except OSError:
+                pass
+            return True
+        except OSError:
+            time.sleep(0.5)
+    return False
 
 
 class ErrorConsultaActualizacion(Exception):
@@ -252,9 +318,16 @@ def aplicar_actualizacion_y_reiniciar(nuevo_exe: Path, nombre_final: str) -> Non
         "    goto fin\r\n"
         ")\r\n"
         ":mover\r\n"
+        "set MOVER_INTENTOS=0\r\n"
+        ":reintentar_mover\r\n"
         f'move /Y "{nuevo_exe}" "{exe_destino}" >> "{log_path}" 2>&1\r\n'
         "if errorlevel 1 (\r\n"
-        f'    echo [%date% %time%] ERROR: no se pudo mover el archivo nuevo. >> "{log_path}"\r\n'
+        "    set /a MOVER_INTENTOS+=1\r\n"
+        "    if !MOVER_INTENTOS! lss 20 (\r\n"
+        "        timeout /t 1 /nobreak >NUL\r\n"
+        "        goto reintentar_mover\r\n"
+        "    )\r\n"
+        f'    echo [%date% %time%] ERROR: no se pudo mover el archivo nuevo tras !MOVER_INTENTOS! intentos. >> "{log_path}"\r\n'
         "    goto fin\r\n"
         ")\r\n"
         f'echo [%date% %time%] Archivo reemplazado como {nombre_final}. Reabriendo... >> "{log_path}"\r\n'
