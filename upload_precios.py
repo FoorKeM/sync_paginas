@@ -22,6 +22,7 @@ configure_playwright_browsers()
 from playwright.async_api import async_playwright
 import config as _cfg
 from utils import (
+    ErrorCredenciales,
     asegurar_empresa_mercadohouse,
     asegurar_punto_ventas_abierto,
     click_y_capturar_pagina,
@@ -729,6 +730,9 @@ async def subir_precios():
             borrar_excel_usado(excel_path)
 
         except Exception as e:
+            if isinstance(e, ErrorCredenciales):
+                await browser.close()
+                raise
             log(f"❌ ERROR: {e}")
             await guardar_diagnostico(page, e, log, "upload_precios", medidor)
             medidor.resumen()

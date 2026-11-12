@@ -19,6 +19,7 @@ from app_paths import runtime_path, configure_playwright_browsers, DESCARGA_DIR
 configure_playwright_browsers()
 from playwright.async_api import async_playwright
 from utils import (
+    ErrorCredenciales,
     asegurar_empresa_mercadohouse,
     asegurar_punto_ventas_abierto,
     crear_logger,
@@ -169,6 +170,9 @@ async def exportar_packs():
             log("=" * 55)
 
         except Exception as e:
+            if isinstance(e, ErrorCredenciales):
+                await browser.close()
+                raise
             log(f"ERROR: {e}")
             try:
                 captura = pos_page if "pos_page" in dir() else page

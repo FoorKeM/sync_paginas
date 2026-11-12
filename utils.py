@@ -5,8 +5,10 @@ utils.py — Helpers compartidos para todos los scripts de sincronización.
 import asyncio
 import json
 import os
+import re
 import sys
 import time
+import unicodedata
 from pathlib import Path
 from datetime import datetime
 from playwright.async_api import TimeoutError as PlaywrightTimeoutError
@@ -543,6 +545,31 @@ async def esperar_confirmacion_carga_mercadohouse(page, log_fn, timeout: int = 1
 
 # ── Login helpers ─────────────────────────────────────────────────────────────
 
+class ErrorCredenciales(Exception):
+    def __init__(self, servicio):
+        self.servicio = servicio
+        super().__init__(f"Contraseña incorrecta para {servicio}")
+
+
+async def _contrasena_rechazada(page):
+    """Reconoce mensajes explícitos de credenciales incorrectas."""
+    try:
+        texto = await page.locator("body").inner_text(timeout=3000)
+    except Exception:
+        return False
+    texto = unicodedata.normalize("NFKD", texto.lower())
+    texto = "".join(c for c in texto if not unicodedata.combining(c))
+    patrones = (
+        r"(?:contrasena|clave|password|credenciales).{0,55}(?:incorrect|invalid|errone|equivocad)",
+        r"(?:contrasena|clave|password|credenciales).{0,55}(?:no (?:son|es) correct|no (?:son|es) valid|no coinciden)",
+        r"(?:incorrect|invalid|errone|equivocad).{0,55}(?:contrasena|clave|password|credenciales)",
+        r"(?:usuario|correo|email).{0,55}(?:contrasena|clave|password).{0,55}(?:incorrect|invalid)",
+        r"(?:invalid|incorrect) credentials",
+        r"datos de acceso.{0,55}incorrect",
+    )
+    return any(re.search(patron, texto) for patron in patrones)
+
+
 async def login_tivendo(page, email: str, password: str, log_fn) -> None:
     """Login en tivendoapp.defontana.com. Lanza Exception si falla."""
     log_fn("Abriendo login de Tivendo...")
@@ -572,6 +599,8 @@ async def login_tivendo(page, email: str, password: str, log_fn) -> None:
         pass
     await esperar_carga_ligera(page)
     if "login" in page.url.lower():
+        if await _contrasena_rechazada(page):
+            raise ErrorCredenciales("Tivendo")
         raise Exception("Login Tivendo fallido")
     await guardar_sesion_contexto(page.context, log_fn)
     log_fn("✓ Login Tivendo exitoso")
@@ -616,6 +645,8 @@ async def login_mercadohouse(page, email: str, password: str, log_fn) -> None:
         pass
     await esperar_carga_ligera(page)
     if "login" in page.url.lower():
+        if await _contrasena_rechazada(page):
+            raise ErrorCredenciales("Mercadohouse")
         try:
             texto = (await page.locator("body").inner_text(timeout=3000)).strip()
             resumen = " ".join(texto.split())[:220]

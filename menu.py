@@ -11,10 +11,11 @@ import sys
 import subprocess
 import re
 import os
+from getpass import getpass
 from pathlib import Path
 from datetime import datetime, date
 from app_paths import APP_DIR, configure_console_encoding, configure_playwright_browsers, runtime_path
-from utils import MODO_LIMPIO_ENV, borrar_sesion_guardada
+from utils import MODO_LIMPIO_ENV, ErrorCredenciales, borrar_sesion_guardada, crear_pagina_trabajo, login_tivendo, login_mercadohouse
 
 HERE = APP_DIR
 sys.path.insert(0, str(HERE))
@@ -264,7 +265,7 @@ def imprimir_resumen_upload_precios():
 MAX_REINTENTOS = 3
 ESPERA_REINTENTO = 30  # segundos entre reintentos
 
-async def ejecutar_con_reintentos(nombre, fn_check, fn_run):
+async def ejecutar_con_reintentos(nombre, fn_check, fn_run, permitir_correccion=True):
     """Llama a fn_run hasta MAX_REINTENTOS veces si falla."""
     if not fn_check():
         print(f"  ❌  Módulo no encontrado para: {nombre}")
@@ -282,6 +283,18 @@ async def ejecutar_con_reintentos(nombre, fn_check, fn_run):
             await fn_run()
             os.environ.pop(MODO_LIMPIO_ENV, None)
             return True
+        except ErrorCredenciales as error:
+            os.environ.pop(MODO_LIMPIO_ENV, None)
+            if not permitir_correccion:
+                print(f"  ❌  {nombre}: {error.servicio} volvió a rechazar la contraseña.")
+                return False
+            if "--auto" in sys.argv:
+                print(f"  ❌  {nombre}: contraseña incorrecta de {error.servicio}. Abre MHSync para cambiarla.")
+                return False
+            if await corregir_contrasena(error.servicio):
+                borrar_sesion_guardada()
+                return await ejecutar_con_reintentos(nombre, fn_check, fn_run, permitir_correccion=False)
+            return False
         except SystemExit as e:
             codigo = int(str(e))
             if codigo == 0:
@@ -402,7 +415,7 @@ def _confirmar_ajuste_stock_negativo(items, omitidos=None) -> bool:
     return resp == "s"
 
 
-async def run_stock_negativo():
+async def run_stock_negativo(permitir_correccion=True):
     titulo("PASO 10 — Ajustar Stock Negativo", depende_sucursal=True)
     if not _tiene_stock_negativo:
         print("  ❌  Módulo no encontrado para: Ajustar Stock Negativo")
@@ -412,6 +425,11 @@ async def run_stock_negativo():
     # podría duplicar el ajuste. Cualquier falla se revisa a mano.
     try:
         ok = await stock_negativo.ejecutar_ajuste_completo(confirmar_fn=_confirmar_ajuste_stock_negativo)
+    except ErrorCredenciales as error:
+        if permitir_correccion and await corregir_contrasena(error.servicio):
+            borrar_sesion_guardada()
+            return await run_stock_negativo(permitir_correccion=False)
+        return False
     except Exception as e:
         print(f"  ❌  Ajustar Stock Negativo falló: {e}")
         print("  No se reintenta automáticamente: revisa el diagnóstico antes de volver a intentar.")
@@ -723,6 +741,11 @@ def solicitar_apagado_windows(log_auto, ts):
 async def modo_automatico():
     apagar = "--shutdown" in sys.argv
 
+    import credenciales as cred
+    if not all(cred.cargar_credenciales().values()):
+        print("  ❌  Faltan credenciales. Abre MHSync manualmente para configurarlas antes de programar tareas.")
+        return
+
     log_auto = runtime_path("log_automatico.txt")
     ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     linea = "=" * 54
@@ -900,6 +923,127 @@ def _guardar_credenciales(tv_email, tv_pass, mh_email, mh_pass):
         sync_packs.TIVENDO_PASSWORD = tv_pass
         sync_packs.MH_EMAIL = mh_email
         sync_packs.MH_PASSWORD = mh_pass
+    if _tiene_stock_negativo:
+        stock_negativo.EMAIL = tv_email
+        stock_negativo.PASSWORD = tv_pass
+
+
+def leer_contrasena(prompt):
+    """Lee una contraseña oculta; F2 o TAB permiten verla al editarla."""
+    if os.name != "nt" or not sys.stdin.isatty():
+        return getpass(prompt)
+
+    import msvcrt
+    print(prompt, end="", flush=True)
+    caracteres = []
+    visible = False
+    while True:
+        tecla = msvcrt.getwch()
+        if tecla in ("\r", "\n"):
+            print()
+            return "".join(caracteres)
+        if tecla == "\x03":
+            print()
+            raise KeyboardInterrupt
+        if tecla == "\x1a":
+            print()
+            raise EOFError
+        if tecla in ("\x00", "\xe0"):
+            tecla_especial = msvcrt.getwch()
+            alternar = tecla_especial == "<"  # F2 en la consola de Windows
+        else:
+            alternar = tecla == "\t"
+        if alternar:
+            visible = not visible
+            if caracteres:
+                mostrado = "".join(caracteres) if visible else "*" * len(caracteres)
+                print("\b" * len(caracteres) + mostrado, end="", flush=True)
+        elif tecla == "\b":
+            if caracteres:
+                caracteres.pop()
+                print("\b \b", end="", flush=True)
+        elif tecla.isprintable():
+            caracteres.append(tecla)
+            print(tecla if visible else "*", end="", flush=True)
+
+
+async def verificar_credencial(servicio, correo, clave):
+    from playwright.async_api import async_playwright
+    async with async_playwright() as p:
+        browser, _, page = await crear_pagina_trabajo(p, incognito=True)
+        try:
+            if servicio == "Tivendo":
+                await login_tivendo(page, correo, clave, lambda _: None)
+            else:
+                await login_mercadohouse(page, correo, clave, lambda _: None)
+        finally:
+            await browser.close()
+
+
+async def configurar_credenciales_iniciales():
+    import credenciales as cred
+    datos = cred.cargar_credenciales()
+    if all(datos.values()):
+        return True
+    print("\n  CONFIGURACIÓN INICIAL DE ACCESOS")
+    print("  Se comprobará cada inicio de sesión antes de guardar las credenciales.\n")
+    for servicio, titulo_acceso, campo_correo, campo_clave in (
+        ("Tivendo", "TIVENDO", "TIVENDO_EMAIL", "TIVENDO_PASSWORD"),
+        ("Mercadohouse", "MERCADO HOUSE", "MH_EMAIL", "MH_PASSWORD"),
+    ):
+        print("  " + "─" * 48)
+        print(f"  INGRESA CREDENCIALES {titulo_acceso}")
+        print("  " + "─" * 48)
+        while True:
+            correo = datos[campo_correo] or input(f"  Correo {servicio}: ").strip()
+            clave = datos[campo_clave] or input(f"  Contraseña {servicio}: ")
+            if not correo or not clave:
+                print("  Debes ingresar correo y contraseña.")
+                datos[campo_correo] = ""
+                datos[campo_clave] = ""
+                continue
+            print(f"  Comprobando acceso a {servicio}...")
+            try:
+                await verificar_credencial(servicio, correo, clave)
+            except ErrorCredenciales:
+                print(f"  ❌  {servicio} rechazó la contraseña. Inténtalo de nuevo.")
+            except Exception as error:
+                if str(error).startswith(f"Login {servicio} fallido"):
+                    print(f"  ❌  No se pudo iniciar sesión en {servicio}. Revisa correo y contraseña.")
+                else:
+                    print(f"  ❌  No se pudo comprobar {servicio}: {error}")
+            else:
+                datos[campo_correo], datos[campo_clave] = correo, clave
+                print(f"  ✅  Acceso a {servicio} comprobado.\n")
+                break
+            datos[campo_correo], datos[campo_clave] = "", ""
+    _guardar_credenciales(datos["TIVENDO_EMAIL"], datos["TIVENDO_PASSWORD"], datos["MH_EMAIL"], datos["MH_PASSWORD"])
+    print("  ✅  Credenciales guardadas en este equipo.\n")
+    return True
+
+
+async def corregir_contrasena(servicio):
+    import credenciales as cred
+    datos = cred.cargar_credenciales()
+    prefijo = "TIVENDO" if servicio == "Tivendo" else "MH"
+    print(f"\n  ❌  {servicio} rechazó la contraseña durante la sincronización.")
+    clave = leer_contrasena(f"  Nueva contraseña de {servicio} (F2/TAB para ver, ENTER cancela): ")
+    if not clave:
+        return False
+    try:
+        await verificar_credencial(servicio, datos[prefijo + "_EMAIL"], clave)
+    except ErrorCredenciales:
+        print("  ❌  La nueva contraseña también fue rechazada.")
+        return False
+    except Exception as error:
+        print(f"  ❌  No se pudo comprobar la nueva contraseña: {error}")
+        return False
+    datos[prefijo + "_PASSWORD"] = clave
+    _guardar_credenciales(datos["TIVENDO_EMAIL"], datos["TIVENDO_PASSWORD"], datos["MH_EMAIL"], datos["MH_PASSWORD"])
+    print("  ✅  Nueva contraseña comprobada y guardada. Reintentando la tarea...\n")
+    return True
+
+
 def editar_credenciales():
     import importlib
 
@@ -917,6 +1061,7 @@ def editar_credenciales():
         print(f"  ❌  No se pudo leer credenciales: {e}")
         return
 
+    mostrar_claves = False
     while True:
         clear()
         titulo("EDITAR CREDENCIALES")
@@ -929,11 +1074,16 @@ def editar_credenciales():
         print(f"  ║  3.  Correo Mercadohouse {vals['mh_email']:<30}║")
         print(f"  ║  4.  Clave  Mercadohouse {'*' * len(vals['mh_pass']):<30}║")
         print("  ║  ────────────────────────────────────────────────  ║")
-        print("  ║  5.  Volver al menú principal                      ║")
+        opcion_claves = f"  5.  {'Ocultar' if mostrar_claves else 'Mostrar'} contraseñas guardadas"
+        print(f"  ║{opcion_claves:<53}║")
+        print(f"  ║{'  6.  Volver al menú principal':<53}║")
         print("  ╚══════════════════════════════════════════════════════╝")
+        if mostrar_claves:
+            print(f"  Clave Tivendo guardada: {vals['tv_pass']}")
+            print(f"  Clave Mercadohouse guardada: {vals['mh_pass']}")
         print()
 
-        op = input("  ¿Qué deseas cambiar? (1-5): ").strip()
+        op = input("  ¿Qué deseas cambiar? (1-6): ").strip()
 
         campo_map = {
             "1": ("tv_email",  "Correo Tivendo"),
@@ -942,15 +1092,18 @@ def editar_credenciales():
             "4": ("mh_pass",   "Clave Mercadohouse"),
         }
 
-        if op == "5":
+        if op == "6":
             break
+        elif op == "5":
+            mostrar_claves = not mostrar_claves
+            continue
         elif op in campo_map:
             key, label = campo_map[op]
             actual = vals[key]
             print()
             print(f"  Editando: {label}")
-            print(f"  Valor actual: {actual}")
-            nuevo = input("  Nuevo valor (ENTER para cancelar): ").strip()
+            print(f"  Valor actual: {'********' if key.endswith('pass') and not mostrar_claves else actual}")
+            nuevo = (leer_contrasena("  Nueva contraseña (F2/TAB para ver, ENTER cancela): ") if key.endswith("pass") else input("  Nuevo valor (ENTER para cancelar): ")).strip()
             if not nuevo:
                 print("  Cancelado.")
                 import time; time.sleep(1)
@@ -960,7 +1113,7 @@ def editar_credenciales():
                 import time; time.sleep(1)
                 continue
             # Confirmar
-            print(f"  {label}:  {actual}  →  {nuevo}")
+            print(f"  {label}:  {'********' if key.endswith('pass') else actual}  →  {'********' if key.endswith('pass') else nuevo}")
             ok = input("  ¿Confirmar? (s/n): ").strip().lower()
             if ok != "s":
                 print("  Cancelado.")
@@ -987,6 +1140,7 @@ async def menu_principal():
         if _tiene_updater:
             updater.limpiar_actualizacion_anterior(APP_DIR)
         verificar_actualizacion()
+    await configurar_credenciales_iniciales()
     while True:
         clear()
         banner()

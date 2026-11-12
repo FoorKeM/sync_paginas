@@ -20,6 +20,7 @@ configure_playwright_browsers()
 from playwright.async_api import TimeoutError as PlaywrightTimeoutError, async_playwright
 import config as _cfg
 from utils import (
+    ErrorCredenciales,
     asegurar_empresa_mercadohouse,
     click_y_capturar_pagina,
     click_tarjeta_defontana,
@@ -577,6 +578,9 @@ async def sincronizar():
             log("=" * 55)
 
         except Exception as e:
+            if isinstance(e, ErrorCredenciales):
+                await browser.close()
+                raise
             log(f"❌ ERROR: {e}")
             captura = erp_page if 'erp_page' in dir() else page
             await guardar_diagnostico(captura, e, log, "sync_precios", medidor)
