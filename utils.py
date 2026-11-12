@@ -303,15 +303,71 @@ async def esperar_carga_ligera(page, timeout: int = 15000) -> None:
 
 async def click_y_capturar_pagina(context, page, locator, timeout: int = 3500):
     """Click que puede abrir pestana nueva; si no, devuelve la misma pagina."""
+    accion = locator if callable(locator) else locator.click
     try:
         async with context.expect_page(timeout=timeout) as page_info:
-            await reintentar_accion("click que abre modulo", locator.click)
+            await reintentar_accion("click que abre modulo", accion)
         nueva = await page_info.value
         await esperar_carga_ligera(nueva)
         return nueva, True
     except PlaywrightTimeoutError:
         await esperar_carga_ligera(page)
         return page, False
+
+
+async def click_tarjeta_defontana(page, nombre: str) -> None:
+    """Busca el módulo por nombre en Recientes o Todos y pulsa su tarjeta."""
+    nombres = [nombre]
+    if nombre == "Punto de Ventas":
+        nombres.append("Punto de Venta")
+
+    async def marcar_tarjeta():
+        return await page.evaluate(
+        """(nombres) => {
+            const normalizar = (valor) => (valor || '').normalize('NFD')
+                .replace(/[\\u0300-\\u036f]/g, '').replace(/\\s+/g, ' ')
+                .trim().toLocaleLowerCase('es');
+            const opciones = nombres.map(normalizar);
+            const visibles = [...document.querySelectorAll('a, button, [role="button"], h1, h2, h3, h4, p, div, span')]
+                .filter((el) => {
+                    if (!opciones.includes(normalizar(el.innerText || el.textContent))) return false;
+                    const estilo = getComputedStyle(el);
+                    const rect = el.getBoundingClientRect();
+                    return estilo.display !== 'none' && estilo.visibility !== 'hidden'
+                        && rect.width > 0 && rect.height > 0;
+                });
+            const texto = visibles[visibles.length - 1];
+            if (!texto) return false;
+            let destino = texto.closest('a, button, [role="button"], mat-card, .mat-card, .mat-mdc-card');
+            if (!destino) {
+                destino = texto;
+                for (let i = 0; i < 4 && destino.parentElement; i++) {
+                    destino = destino.parentElement;
+                    const estilo = getComputedStyle(destino);
+                    if (estilo.cursor === 'pointer' || destino.onclick) break;
+                }
+            }
+            document.querySelectorAll('[data-mh-modulo]').forEach((el) => el.removeAttribute('data-mh-modulo'));
+            destino.setAttribute('data-mh-modulo', nombres[0]);
+            return true;
+        }""",
+        nombres,
+        )
+
+    resultado = await marcar_tarjeta()
+    if not resultado:
+        try:
+            await page.get_by_text("Todos", exact=True).first.click(timeout=5000)
+            await esperar_carga_ligera(page)
+        except Exception:
+            pass
+        resultado = await marcar_tarjeta()
+    if not resultado:
+        raise Exception(
+            f"No se encontró '{nombre}' en Módulos recientes ni en Todos del portal Defontana. "
+            "Revisa si Defontana cambió el nombre del módulo."
+        )
+    await page.locator('[data-mh-modulo]').click(timeout=10000)
 
 
 async def asegurar_punto_ventas_abierto(context, page, log_fn):
@@ -329,7 +385,7 @@ async def asegurar_punto_ventas_abierto(context, page, log_fn):
     pos_page, nueva_pestana = await click_y_capturar_pagina(
         context,
         page,
-        page.get_by_text("Punto de Ventas", exact=True).last,
+        lambda: click_tarjeta_defontana(page, "Punto de Ventas"),
         timeout=6000,
     )
     log_fn("Punto de Ventas abrio en pestana nueva" if nueva_pestana else "Punto de Ventas navego en la misma pestana")
@@ -354,7 +410,7 @@ async def asegurar_punto_ventas_abierto(context, page, log_fn):
                 nuevo_page, nueva = await click_y_capturar_pagina(
                     context,
                     pos_page,
-                    pos_page.get_by_text("Punto de Ventas", exact=True).last,
+                    lambda: click_tarjeta_defontana(pos_page, "Punto de Ventas"),
                     timeout=4000,
                 )
                 pos_page = nuevo_page

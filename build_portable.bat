@@ -12,20 +12,14 @@ if errorlevel 1 goto error
 python -m PyInstaller MercadohouseSync.spec --clean --noconfirm
 if errorlevel 1 goto error
 
-for /f "usebackq tokens=*" %%v in (`python -c "from version import APP_VERSION; print(APP_VERSION)"`) do set "APP_VERSION=%%v"
-
 set "PORTABLE=%~dp0portable\MercadohouseSync"
-if exist "%PORTABLE%" rmdir /s /q "%PORTABLE%"
-mkdir "%PORTABLE%"
+if not exist "%PORTABLE%" mkdir "%PORTABLE%"
 
-copy /Y "%~dp0dist\MercadohouseSync.exe" "%PORTABLE%\MercadohouseSync.exe"
-copy /Y "%~dp0dist\MercadohouseSync.exe" "%PORTABLE%\MercadohouseSync_%APP_VERSION%.exe"
-echo %APP_VERSION%>"%PORTABLE%\VERSION.txt"
+copy /Y "%~dp0dist\MercadohouseSync.exe" "%PORTABLE%\MHSync.exe"
 
 echo.
 echo Listo:
-echo %PORTABLE%\MercadohouseSync.exe
-echo %PORTABLE%\MercadohouseSync_%APP_VERSION%.exe
+echo %PORTABLE%\MHSync.exe
 echo.
 pause
 exit /b 0

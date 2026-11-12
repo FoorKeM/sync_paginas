@@ -22,6 +22,7 @@ import config as _cfg
 from utils import (
     asegurar_empresa_mercadohouse,
     click_y_capturar_pagina,
+    click_tarjeta_defontana,
     crear_logger,
     crear_pagina_trabajo,
     esperar_confirmacion_carga_mercadohouse,
@@ -274,60 +275,26 @@ async def click_informes_ventas_clasico(page, log_fn):
 
 
 async def click_tarjeta_erp_digital(page, log_fn):
-    """Hace click en la tarjeta completa del portal, no solo en el texto."""
-    resultado = await page.evaluate(
-        """
-        () => {
-            const normalizar = (txt) => (txt || '').replace(/\\s+/g, ' ').trim();
-            const visibles = Array.from(document.querySelectorAll('a, button, mat-card, [role="button"], div, span'))
-                .filter((el) => {
-                    const texto = normalizar(el.innerText || el.textContent);
-                    if (texto !== 'ERP Digital') return false;
-                    const estilo = window.getComputedStyle(el);
-                    const rect = el.getBoundingClientRect();
-                    return estilo.display !== 'none'
-                        && estilo.visibility !== 'hidden'
-                        && rect.width > 0
-                        && rect.height > 0;
-                });
-            const texto = visibles[visibles.length - 1];
-            if (!texto) return { ok: false, encontrados: visibles.length };
-
-            let destino = texto.closest('a, button, [role="button"], mat-card, .mat-mdc-card, .mat-card');
-            if (!destino) {
-                destino = texto;
-                for (let i = 0; i < 4 && destino.parentElement; i++) {
-                    destino = destino.parentElement;
-                    const cursor = window.getComputedStyle(destino).cursor;
-                    if (cursor === 'pointer' || destino.onclick) break;
-                }
-            }
-            destino.scrollIntoView({ block: 'center', inline: 'nearest' });
-            destino.click();
-            return { ok: true, tag: destino.tagName, encontrados: visibles.length };
-        }
-        """
-    )
-    if not resultado.get("ok"):
-        raise Exception("No se encontro la tarjeta 'ERP Digital' en el portal.")
-    log_fn(f"  Click tarjeta ERP Digital ({resultado.get('tag')}, {resultado.get('encontrados')} encontrado(s))")
+    """Abre la tarjeta ERP Digital del portal."""
+    await click_tarjeta_defontana(page, "ERP Digital")
+    log_fn("  Click tarjeta ERP Digital")
 
 
-async def esperar_erp_digital_abierto(page, log_fn):
+async def esperar_erp_digital_abierto(context, page, log_fn):
     """Espera señales reales del ERP; evita confundir el portal con el módulo ERP."""
     limite = asyncio.get_event_loop().time() + 45
     uso_url_directa = False
     while asyncio.get_event_loop().time() < limite:
         if "erp.defontana.com" in page.url:
             await esperar_carga_ligera(page)
-            log_fn("âœ“ ERP Digital detectado por URL")
-            return
+            log_fn("✓ ERP Digital detectado por URL")
+            return page
 
         for texto in ("Ecosistema Digital", "Clientes y Productos", "Listado de Documentos"):
             try:
                 if await page.get_by_text(texto, exact=True).count() > 0:
                     log_fn(f"✓ ERP Digital detectado por menú: {texto}")
-                    return
+                    return page
             except Exception:
                 pass
 
@@ -341,12 +308,10 @@ async def esperar_erp_digital_abierto(page, log_fn):
                     await page.goto(ERP_DASHBOARD_URL, timeout=30000)
                     continue
                 log_fn("  Aun en portal; reintentando click en tarjeta ERP Digital...")
-                await click_tarjeta_erp_digital(page, log_fn)
+                page, _ = await click_y_capturar_pagina(
+                    context, page, lambda: click_tarjeta_erp_digital(page, log_fn), timeout=4000,
+                )
                 continue
-            erp_card = page.get_by_text("ERP Digital", exact=True).last
-            if en_portal and await erp_card.count() > 0:
-                log_fn("  Aún en portal; reintentando clic en ERP Digital...")
-                await erp_card.click()
         except Exception:
             pass
 
@@ -402,7 +367,7 @@ async def sincronizar():
                 erp_page, nueva_pestana = await click_y_capturar_pagina(
                     context,
                     page,
-                    page.get_by_text("ERP Digital", exact=True).last,
+                    lambda: click_tarjeta_erp_digital(page, log),
                 )
 
             # Capturar nueva pestaña si abrió, o usar la misma
@@ -411,7 +376,7 @@ async def sincronizar():
             else:
                 log("ERP Digital navegó en la misma pestaña")
 
-            await esperar_erp_digital_abierto(erp_page, log)
+            erp_page = await esperar_erp_digital_abierto(context, erp_page, log)
             log(f"✓ En ERP Digital — {erp_page.url}")
 
             # ── 3. NAVEGAR A INFORMES DE VENTAS ───────────────────

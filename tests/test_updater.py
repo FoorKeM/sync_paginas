@@ -62,6 +62,18 @@ class BuscarReleaseNuevoTests(unittest.TestCase):
             },
         )
 
+    def test_returns_release_info_with_fixed_exe_name(self):
+        payload = {
+            "tag_name": "v1.9.24",
+            "body": "Nuevo portal Defontana",
+            "assets": [{"name": "MHSync.exe", "browser_download_url": "exe-url"}],
+        }
+        with patch("updater.urllib.request.urlopen", return_value=_fake_response(payload)):
+            info = updater.buscar_release_nuevo("v1.9.23-2026-08-16")
+
+        self.assertEqual(info["version"], "v1.9.24")
+        self.assertEqual(info["nombre_archivo"], "MHSync.exe")
+
 
 class DescargarActualizacionTests(unittest.TestCase):
     def test_writes_file_and_reports_cumulative_progress(self):
@@ -110,7 +122,7 @@ class AplicarActualizacionTests(unittest.TestCase):
             with self.assertRaises(Exception):
                 updater.aplicar_actualizacion_y_reiniciar(None, "MHSync_V1.9.1.exe")
 
-    def test_bat_script_renames_to_new_version_filename(self):
+    def test_bat_script_replaces_versioned_exe_with_fixed_name(self):
         import tempfile
         from pathlib import Path
 
@@ -127,12 +139,12 @@ class AplicarActualizacionTests(unittest.TestCase):
                 patch("updater.subprocess.Popen") as popen,
                 patch("updater.sys.exit") as exit_mock,
             ):
-                updater.aplicar_actualizacion_y_reiniciar(nuevo_exe, "MHSync_V1.9.1.exe")
+                updater.aplicar_actualizacion_y_reiniciar(nuevo_exe, "MHSync.exe")
 
             bat_path = tmp_dir / "_actualizar_mhsync.bat"
             contenido = bat_path.read_text(encoding="utf-8")
 
-            self.assertIn(str(tmp_dir / "MHSync_V1.9.1.exe"), contenido)
+            self.assertIn(str(tmp_dir / "MHSync.exe"), contenido)
             self.assertIn(f'del /F /Q "{exe_viejo}"', contenido)
             popen.assert_called_once()
             exit_mock.assert_called_once_with(0)

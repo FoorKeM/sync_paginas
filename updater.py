@@ -123,10 +123,10 @@ def descargar_actualizacion(url: str, destino: Path, progreso_fn=None) -> None:
 
 
 def aplicar_actualizacion_y_reiniciar(nuevo_exe: Path, nombre_final: str) -> None:
-    """Reemplaza el .exe actual por el descargado, con el nombre de la version nueva, y reinicia.
+    """Reemplaza el .exe actual por el descargado y lo reinicia.
 
     El archivo final queda en la misma carpeta que el .exe actual pero con el
-    nombre del release (ej. MHSync_V1.9.1.exe), no con el nombre viejo. Termina
+    nombre del archivo adjunto al release (actualmente MHSync.exe). Termina
     el proceso actual; el reemplazo y el reinicio los hace un .bat auxiliar
     porque Windows no permite sobrescribir un .exe mientras esta corriendo.
     """
