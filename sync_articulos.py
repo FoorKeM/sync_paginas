@@ -18,13 +18,15 @@ configure_playwright_browsers()
 from playwright.async_api import async_playwright
 from utils import (
     ErrorCredenciales,
+    ErrorEtapaFuente,
+    abrir_seccion_pos,
     asegurar_empresa_mercadohouse,
     asegurar_punto_ventas_abierto,
     crear_logger,
     crear_pagina_trabajo,
     guardar_diagnostico,
+    exportar_excel_pos,
     ir_a_importadores_mercadohouse,
-    limpiar_carpeta_archivos,
     esperar_confirmacion_carga_mercadohouse,
     login_tivendo,
     login_mercadohouse,
@@ -51,7 +53,7 @@ log = crear_logger(LOG_FILE)
 
 async def sincronizar():
     rotar_log(LOG_FILE)
-    medidor = MedidorEtapas(log)
+    medidor = MedidorEtapas(log, "Artículos")
 
     log("=" * 55)
     log("INICIO SINCRONIZACIÓN ARTÍCULOS TIVENDO → MERCADOHOUSE")
@@ -86,27 +88,15 @@ async def sincronizar():
             log(f"✓ En Punto de Ventas — {pos_page.url}")
 
             # ── 3. IR A ARTÍCULOS → LISTADO DE ARTÍCULOS ──────────
-            log("Navegando a Artículos → Listado de artículos...")
-
-            # Clic en menú "Artículos" del sidebar
-            await pos_page.get_by_text("Artículos", exact=True).first.click()
-            await pos_page.get_by_role("link", name="Listado de artículos", exact=True).wait_for(state="visible", timeout=10000)
-
-            # Clic en submenú "Listado de artículos"
-            await pos_page.get_by_role("link", name="Listado de artículos", exact=True).click()
-            await pos_page.get_by_role("button", name="Exportar").wait_for(state="visible", timeout=25000)
+            with medidor.etapa("Entrar al listado de artículos"):
+                await abrir_seccion_pos(pos_page, "Listado de artículos", log)
             log(f"✓ En Listado de artículos — {pos_page.url}")
 
             # ── 4. EXPORTAR (descarga puede demorar varios minutos) ─
             with medidor.etapa("Exportar articulos Tivendo"):
-                log("Haciendo clic en Exportar... (puede demorar varios minutos)")
-                async with pos_page.expect_download(timeout=300000) as download_info:
-                    await pos_page.get_by_role("button", name="Exportar").click()
-
-                download = await download_info.value
-                nombre_archivo = download.suggested_filename or "listado_articulos.xlsx"
-                ruta_archivo = str(Path(CARPETA_DESCARGA) / nombre_archivo)
-                await download.save_as(ruta_archivo)
+                nombre_archivo, ruta_archivo = await exportar_excel_pos(
+                    pos_page, CARPETA_DESCARGA, "listado_articulos.xlsx", log
+                )
 
             log(f"✓ Archivo descargado: {nombre_archivo}")
             log(f"  Guardado en: {ruta_archivo}")
@@ -131,17 +121,13 @@ async def sincronizar():
                 await esperar_confirmacion_carga_mercadohouse(page, log)
             log("✓ Lista de artículos cargada")
 
-            # ── 9. LIMPIAR CARPETA DE DESCARGAS ────────────────
-            try:
-                n = limpiar_carpeta_archivos(CARPETA_DESCARGA)
-                log(f"🗑️  Carpeta limpiada: {n} archivo(s) eliminado(s)")
-            except Exception as e:
-                log(f"⚠️  No se pudo limpiar la carpeta: {e}")
-
             log("=" * 55)
             log("✅ SINCRONIZACIÓN DE ARTÍCULOS COMPLETADA EXITOSAMENTE")
             log("=" * 55)
 
+        except asyncio.CancelledError:
+            await browser.close()
+            raise
         except Exception as e:
             if isinstance(e, ErrorCredenciales):
                 await browser.close()
@@ -154,14 +140,8 @@ async def sincronizar():
                 pass
             medidor.resumen()
 
-            # Intentar limpiar carpeta aunque haya error
-            try:
-                limpiar_carpeta_archivos(CARPETA_DESCARGA)
-            except Exception:
-                pass
-
             await browser.close()
-            sys.exit(1)
+            raise ErrorEtapaFuente("Artículos", medidor.ultima_etapa or "Inicio", e) from e
 
         await browser.close()
         medidor.resumen()

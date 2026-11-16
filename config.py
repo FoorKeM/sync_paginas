@@ -12,7 +12,7 @@ CONFIG_FILE = HERE / "config_sucursal.json"
 # Agrega o edita sucursales aquí si cambian los nombres en los sistemas.
 SUCURSALES = {
     "LIBERTADOR": {
-        "nombre":               "Las Compañías — Libertador 1476",
+        "nombre":               "Las Compañías",
         "tivendo_lista_num":    5,                          # número de fila en tabla Tivendo POS
         "tivendo_lista_erp":    "LISTA LOS LIBERTADORES 1476",  # texto en dropdown ERP
         "mh_local":             "LIBERTADOR 1476",          # opción en Mercadohouse

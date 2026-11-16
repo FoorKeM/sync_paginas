@@ -1,6 +1,8 @@
 # -*- mode: python ; coding: utf-8 -*-
 
 from PyInstaller.utils.hooks import collect_data_files, collect_submodules
+from pathlib import Path
+import playwright
 
 
 # Solo se usa playwright.async_api en todo el proyecto (nunca sync_api) —
@@ -12,6 +14,9 @@ hiddenimports = (
     collect_submodules("playwright.async_api")
     + collect_submodules("playwright._impl")
     + collect_submodules("openpyxl")
+    + collect_submodules("qrcode")
+    + collect_submodules("pystray")
+    + collect_submodules("PIL")
     + ["certifi", "et_xmlfile"]
 )
 
@@ -19,12 +24,12 @@ hiddenimports = (
 a = Analysis(
     ["menu.py"],
     pathex=[],
-    binaries=[],
+    binaries=[(str(Path(playwright.__file__).parent / "driver" / "node.exe"), "playwright/driver")],
     datas=datas,
     hiddenimports=hiddenimports,
     hookspath=[],
     hooksconfig={},
-    runtime_hooks=[],
+    runtime_hooks=["runtime_console.py"],
     excludes=["playwright.sync_api"],
     noarchive=False,
     optimize=0,

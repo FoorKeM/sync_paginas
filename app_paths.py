@@ -23,7 +23,8 @@ def _local_app_data_dir() -> Path:
 
 
 APP_DIR = app_dir()
-DATA_DIR = _local_app_data_dir() if IS_FROZEN else APP_DIR
+USER_DATA_DIR = _local_app_data_dir()
+DATA_DIR = USER_DATA_DIR if IS_FROZEN else APP_DIR
 RUNTIME_DIR = (Path(tempfile.gettempdir()) / "MercadohouseSync") if IS_FROZEN else APP_DIR
 DIAG_DIR = DATA_DIR / "diagnosticos"
 DESCARGA_DIR = DATA_DIR / "downloads"

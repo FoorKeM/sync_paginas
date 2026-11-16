@@ -17,7 +17,8 @@ import zipfile
 import xml.etree.ElementTree as ET
 from pathlib import Path
 from datetime import datetime
-from app_paths import runtime_path, configure_playwright_browsers
+from decimal import Decimal, InvalidOperation
+from app_paths import DESCARGA_DIR, USER_DATA_DIR, runtime_path, configure_playwright_browsers
 configure_playwright_browsers()
 from playwright.async_api import async_playwright
 import config as _cfg
@@ -131,6 +132,81 @@ def describir_cambio_precio(fila: list[str]) -> str:
     if rango_ini_2 or rango_fin_2 or precio_2:
         partes.append(f"Rango 2: {rango_ini_2}-{rango_fin_2} | Precio 2: {precio_2}")
     return " | ".join(partes)
+
+
+def formatear_precio_clp(valor) -> str:
+    """Da formato chileno al precio sin cambiar el dato que se importa."""
+    texto = str(valor).strip() if valor is not None else ""
+    if not texto:
+        return "$—"
+    try:
+        numero = Decimal(texto.replace(",", "."))
+        if not numero.is_finite():
+            raise InvalidOperation
+        entero, _, decimales = format(numero, "f").partition(".")
+        entero = f"{int(entero):,}".replace(",", ".")
+        decimales = decimales.rstrip("0")
+        return f"${entero}{',' + decimales if decimales else ''}"
+    except (InvalidOperation, ValueError):
+        return f"${texto}"
+
+
+def detalles_productos_para_vista_previa(codigos: set[str], carpeta: Path | None = None) -> dict[str, dict[str, str]]:
+    """Busca nombres en los listados locales de artículos y packs.
+
+    Recorre primero el más reciente y completa los códigos que falten con
+    listados anteriores. No modifica el Excel de precios ni depende de internet.
+    """
+    from openpyxl import load_workbook
+
+    carpetas = ([Path(carpeta)] if carpeta is not None
+                else [DESCARGA_DIR, USER_DATA_DIR / "downloads", Path.home() / "Downloads"])
+    pendientes = {codigo.strip().upper() for codigo in codigos if codigo.strip()}
+    encontrados: dict[str, dict[str, str]] = {}
+    try:
+        archivos = sorted(
+            {p for origen in carpetas for p in origen.glob("*.xlsx")
+             if ("articul" in p.stem.casefold() and "listado" in p.stem.casefold())
+             or "pack" in p.stem.casefold()},
+            key=lambda p: p.stat().st_mtime, reverse=True,
+        )
+    except OSError:
+        return encontrados
+
+    for archivo in archivos:
+        if not pendientes:
+            break
+        es_pack = "pack" in archivo.stem.casefold()
+        if not any(codigo.startswith("P") == es_pack for codigo in pendientes):
+            continue
+        try:
+            libro = load_workbook(archivo, read_only=True, data_only=True)
+            try:
+                filas = libro.active.iter_rows(values_only=True)
+                for fila in filas:
+                    encabezados = [_normalizar_encabezado(str(valor or "")) for valor in fila]
+                    codigo_columna = next((i for i, valor in enumerate(encabezados)
+                                           if valor in ("CODIGO", "CDIGO")), None)
+                    if codigo_columna is not None and "NOMBRE" in encabezados:
+                        columnas = {"codigo": codigo_columna,
+                                    "nombre": encabezados.index("NOMBRE")}
+                        break
+                else:
+                    continue
+                for fila in filas:
+                    codigo = str(fila[columnas["codigo"]] or "").strip().upper()
+                    if codigo not in pendientes or codigo.startswith("P") != es_pack:
+                        continue
+                    nombre = str(fila[columnas["nombre"]] or "").strip()
+                    if nombre:
+                        encontrados[codigo] = {"nombre": nombre}
+                        pendientes.remove(codigo)
+            finally:
+                libro.close()
+        except Exception:
+            # Un listado viejo o incompleto no debe impedir revisar el precio.
+            continue
+    return encontrados
 
 
 ENCABEZADO_ESPERADO = ["CODIGO", "RANGOINICIAL1", "RANGOFINAL1", "PRECIO1", "RANGOINICIAL2", "RANGOFINAL2", "PRECIO2"]
@@ -530,7 +606,7 @@ async def subir_precios():
     ULTIMO_EXCEL_USADO = None
     ULTIMOS_PRECIOS_CONFIRMADOS = {}
     rotar_log(LOG_FILE)
-    medidor = MedidorEtapas(log)
+    medidor = MedidorEtapas(log, "Upload Precios")
 
     log("=" * 50)
     log("INICIO DEL PROCESO DE SUBIDA A TIVENDO")
@@ -701,6 +777,11 @@ async def subir_precios():
                 "fallidos": fallidos_resultado,
                 "archivo": excel_path.name,
                 "lista": _cfg.sucursal_activa()["tivendo_lista_erp"],
+                "filas_precios": [
+                    (str(fila[0]).strip(), str(fila[3]).strip(),
+                     str(fila[6]).strip() if len(fila) > 6 else "")
+                    for fila in filas_excel[1:]
+                ],
             }
             fallidos_normalizados = {codigo.strip().upper() for codigo in fallidos_resultado}
             for fila in filas_excel[1:]:
@@ -727,7 +808,10 @@ async def subir_precios():
             log(f"   Lista   : {_cfg.sucursal_activa()['tivendo_lista_erp']}")
             log("=" * 50)
 
-            borrar_excel_usado(excel_path)
+            if not fallidos_resultado:
+                borrar_excel_usado(excel_path)
+            else:
+                log(f"⚠️  Se conserva {excel_path.name} para revisar y reintentar los precios rechazados.")
 
         except Exception as e:
             if isinstance(e, ErrorCredenciales):

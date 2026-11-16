@@ -11,9 +11,12 @@ Flujo:
 """
 
 import asyncio
+import os
+import re
 import sys
 from html.parser import HTMLParser
 from pathlib import Path
+from urllib.parse import urljoin, urlsplit
 from datetime import datetime
 from app_paths import runtime_path, configure_playwright_browsers, DESCARGA_DIR
 configure_playwright_browsers()
@@ -21,6 +24,8 @@ from playwright.async_api import TimeoutError as PlaywrightTimeoutError, async_p
 import config as _cfg
 from utils import (
     ErrorCredenciales,
+    ErrorEtapaFuente,
+    abrir_modulo_defontana,
     asegurar_empresa_mercadohouse,
     click_y_capturar_pagina,
     click_tarjeta_defontana,
@@ -29,8 +34,8 @@ from utils import (
     esperar_confirmacion_carga_mercadohouse,
     esperar_carga_ligera,
     guardar_diagnostico,
+    guardar_descarga_validada,
     ir_a_importadores_mercadohouse,
-    limpiar_carpeta_archivos,
     login_tivendo,
     login_mercadohouse,
     MedidorEtapas,
@@ -97,7 +102,28 @@ class _TablaPreciosParser(HTMLParser):
 
 
 def leer_precios_exportados(archivo: Path) -> dict[str, int]:
-    """Lee el .xls HTML exportado por Defontana sin librerías externas."""
+    """Lee las columnas código/precio del XLS HTML o XLSX de Defontana."""
+    with archivo.open("rb") as handle:
+        if handle.read(2) == b"PK":
+            from openpyxl import load_workbook
+            handle.seek(0)
+            workbook = load_workbook(handle, read_only=True, data_only=True)
+            try:
+                filas = (fila for hoja in workbook.worksheets
+                         for fila in hoja.iter_rows(values_only=True))
+                precios = {}
+                for fila in filas:
+                    if len(fila) < 4:
+                        continue
+                    codigo = str(fila[1] or "").lstrip("'").strip().upper()
+                    valor = fila[3]
+                    precio = (str(int(valor)) if isinstance(valor, (int, float)) else
+                              str(valor or "").replace(",", "").replace(".", "").strip())
+                    if codigo and precio.isdigit():
+                        precios[codigo] = int(precio)
+                return precios
+            finally:
+                workbook.close()
     contenido = archivo.read_text(encoding="latin-1", errors="replace")
     parser = _TablaPreciosParser()
     parser.feed(contenido)
@@ -187,43 +213,67 @@ async def _esperar_descarga_en_popup(popup, log_fn, timeout: int = 300000):
 
 
 async def exportar_precios_tivendo(erp_page, report_frame, carpeta_descarga: str, log_fn):
-    """Exporta precios aunque Tivendo intercale una ventana nueva antes de descargar."""
+    """Escucha ambas páginas antes del clic y cierra popups tras guardar el Excel."""
     exportar = report_frame.locator(
         "a:has-text('Exportar'), button:has-text('Exportar'), input[value='Exportar']"
     ).last
+    await exportar.wait_for(state="visible", timeout=15000)
+    recibido = asyncio.get_running_loop().create_future()
+    popups = []
+    confirmaciones = []
 
-    download_task = asyncio.create_task(erp_page.wait_for_event("download", timeout=300000))
-    popup_task = asyncio.create_task(erp_page.wait_for_event("popup", timeout=0))
+    def al_descargar(download):
+        if not recibido.done():
+            recibido.set_result(download)
+
+    async def confirmar(popup):
+        try:
+            await esperar_carga_ligera(popup)
+            limite = asyncio.get_running_loop().time() + 15
+            while not recibido.done() and not popup.is_closed() and asyncio.get_running_loop().time() < limite:
+                if await _click_boton_confirmacion_exportacion(popup, log_fn):
+                    return
+                for frame in popup.frames:
+                    if frame != popup.main_frame and await _click_boton_confirmacion_exportacion(frame, log_fn):
+                        return
+                await pausa_corta(0.3)
+        except Exception as error:
+            log_fn(f"  Ventana de exportación todavía no lista: {type(error).__name__}")
+
+    def al_abrir_popup(popup):
+        popups.append(popup)
+        popup.on("download", al_descargar)
+        confirmaciones.append(asyncio.create_task(confirmar(popup)))
+
+    erp_page.on("download", al_descargar)
+    erp_page.on("popup", al_abrir_popup)
     try:
+        log_fn("Pulsando Exportar; escuchando la página y cualquier ventana nueva...")
         await exportar.click(force=True)
-        done, _pending = await asyncio.wait(
-            {download_task, popup_task},
-            timeout=35,
-            return_when=asyncio.FIRST_COMPLETED,
+        try:
+            download = await asyncio.wait_for(recibido, timeout=300)
+        except asyncio.TimeoutError as exc:
+            detalle = ("la ventana no entregó el archivo" if popups
+                       else "no comenzó la descarga ni apareció una ventana")
+            raise RuntimeError(f"Lista de Precios: {detalle}") from exc
+        log_fn("Descarga detectada; esperando que termine y comprobando el Excel...")
+        return await guardar_descarga_validada(
+            download, carpeta_descarga, "lista_precios.xls", log_fn,
+            leer_precios_exportados, provisional=True,
         )
-
-        if download_task in done:
-            download = await download_task
-        elif popup_task in done:
-            popup = await popup_task
-            await _cancelar_tarea(download_task)
-            download = await _esperar_descarga_en_popup(popup, log_fn)
-        else:
-            await _cancelar_tarea(popup_task)
-            download = await download_task
-
-        nombre_archivo = download.suggested_filename or "lista_precios.xlsx"
-        ruta_archivo = str(Path(carpeta_descarga) / nombre_archivo)
-        await download.save_as(ruta_archivo)
-        return nombre_archivo, ruta_archivo
-    except PlaywrightTimeoutError as exc:
-        raise Exception(
-            "Tivendo no inicio la descarga de Lista de Precios. "
-            "Si quedo una ventana abierta, revisa si cambio el boton de confirmacion."
-        ) from exc
     finally:
-        await _cancelar_tarea(download_task)
-        await _cancelar_tarea(popup_task)
+        erp_page.remove_listener("download", al_descargar)
+        erp_page.remove_listener("popup", al_abrir_popup)
+        for popup in popups:
+            popup.remove_listener("download", al_descargar)
+        for tarea in confirmaciones:
+            if not tarea.done():
+                tarea.cancel()
+        await asyncio.gather(*confirmaciones, return_exceptions=True)
+        await asyncio.gather(*(popup.close() for popup in popups if not popup.is_closed()),
+                             return_exceptions=True)
+        if not recibido.done():
+            recibido.cancel()
 
 
 async def pausar_paso(mensaje: str):
@@ -240,10 +290,14 @@ async def click_informes_ventas_clasico(page, log_fn):
     cantidad = await enlaces_exactos.count()
     if cantidad > 0:
         destino = enlaces_exactos.last
+        href = await destino.get_attribute("href")
+        url_real = urljoin(page.url, href) if href else None
+        if url_real and urlsplit(url_real).hostname != "erp.defontana.com":
+            url_real = None
         await destino.scroll_into_view_if_needed()
         await destino.click()
         log_fn(f"  Informe clasico seleccionado por enlace exacto ({cantidad} encontrado(s))")
-        return
+        return url_real
 
     resultado = await page.evaluate(
         """
@@ -273,6 +327,7 @@ async def click_informes_ventas_clasico(page, log_fn):
     if not resultado.get("ok"):
         raise Exception("No se encontro el enlace clasico 'Informes de Ventas' (sin Nuevo).")
     log_fn(f"  Informe clasico seleccionado por texto visible ({resultado.get('encontrados')} encontrado(s))")
+    return None
 
 
 async def click_tarjeta_erp_digital(page, log_fn):
@@ -323,7 +378,7 @@ async def esperar_erp_digital_abierto(context, page, log_fn):
 
 async def sincronizar():
     rotar_log(LOG_FILE)
-    medidor = MedidorEtapas(log)
+    medidor = MedidorEtapas(log, "Precios")
 
     log("=" * 55)
     log("INICIO SINCRONIZACIÓN TIVENDO → MERCADOHOUSE")
@@ -335,13 +390,6 @@ async def sincronizar():
 
     # Crear carpeta de descarga si no existe
     Path(CARPETA_DESCARGA).mkdir(parents=True, exist_ok=True)
-    try:
-        n = limpiar_carpeta_archivos(CARPETA_DESCARGA)
-        if n:
-            log(f"Carpeta de descarga limpiada antes de exportar precios: {n} archivo(s)")
-    except Exception as e:
-        log(f"No se pudo limpiar la carpeta antes de exportar precios: {e}")
-
     async with async_playwright() as p:
         browser, context, page = await crear_pagina_trabajo(
             p,
@@ -364,23 +412,15 @@ async def sincronizar():
             await pausar_paso("Empresa verificada")
 
             with medidor.etapa("Abrir ERP Digital"):
-                log("Haciendo clic en ERP Digital...")
-                erp_page, nueva_pestana = await click_y_capturar_pagina(
-                    context,
-                    page,
-                    lambda: click_tarjeta_erp_digital(page, log),
+                erp_page = await abrir_modulo_defontana(
+                    context, page, "ERP Digital", "erp.defontana.com",
+                    ("Inventario", "Ventas", "Clientes y Productos", "Listado de Documentos"),
+                    log, url_directa=ERP_DASHBOARD_URL,
                 )
-
-            # Capturar nueva pestaña si abrió, o usar la misma
-            if nueva_pestana:
-                log("ERP Digital abrió en pestaña nueva")
-            else:
-                log("ERP Digital navegó en la misma pestaña")
-
-            erp_page = await esperar_erp_digital_abierto(context, erp_page, log)
             log(f"✓ En ERP Digital — {erp_page.url}")
 
             # ── 3. NAVEGAR A INFORMES DE VENTAS ───────────────────
+            medidor.informar_etapa("Entrar a Informes de Ventas")
             log("Navegando a Ventas > Informes de Ventas...")
             # Clic en menú Ventas (primer nivel)
             await erp_page.locator("text=Ventas").first.click()
@@ -392,11 +432,19 @@ async def sincronizar():
                 await ventas.nth(1).click()
             await pausa_corta(0.2)
             # Clic en "Informes de Ventas" — excluye "Informes de Ventas (Nuevo)"
-            await click_informes_ventas_clasico(erp_page, log)
-            await erp_page.locator("text=Lista de Precios").last.wait_for(state="visible", timeout=25000)
+            url_informe = await click_informes_ventas_clasico(erp_page, log)
+            try:
+                await erp_page.locator("text=Lista de Precios").last.wait_for(state="visible", timeout=25000)
+            except Exception:
+                if not url_informe:
+                    raise
+                log("El informe quedó incompleto; recuperando desde su enlace real...")
+                await erp_page.goto(url_informe, wait_until="domcontentloaded", timeout=30000)
+                await erp_page.locator("text=Lista de Precios").last.wait_for(state="visible", timeout=25000)
             log(f"✓ En Informes de Ventas — {erp_page.url}")
 
             # ── 3b. ABRIR PESTAÑA LISTA DE PRECIOS ────────────────
+            medidor.informar_etapa("Abrir Lista de Precios")
             log("Abriendo pestaña Lista de Precios...")
             lista_tab = erp_page.locator("text=Lista de Precios").last
             await lista_tab.scroll_into_view_if_needed()
@@ -405,6 +453,7 @@ async def sincronizar():
             log("✓ Pestaña Lista de Precios abierta")
 
             # ── 4. SELECCIONAR LISTA DE LA SUCURSAL ACTIVA ─────────
+            medidor.informar_etapa("Seleccionar lista configurada")
             log(f"Seleccionando lista {_cfg.sucursal_activa()['tivendo_lista_erp']}...")
 
             async def get_report_frame(base_page):
@@ -459,14 +508,19 @@ async def sincronizar():
             except Exception:
                 log("  select no apareció vía wait_for, intentando igual...")
 
-            # Obtener opciones para diagnóstico y selección robusta
+            suc = _cfg.sucursal_activa()
+            lista_erp = suc["tivendo_lista_erp"]
+            palabra = lista_erp.split()[1] if len(lista_erp.split()) > 1 else lista_erp
+            try:
+                await select_loc.locator("option").filter(
+                    has_text=re.compile(re.escape(palabra), re.IGNORECASE)
+                ).first.wait_for(state="attached", timeout=15000)
+            except Exception:
+                log("  La lista configurada aún no aparece; revisando opciones disponibles...")
             options = await rframe.evaluate(
                 "() => Array.from(document.querySelectorAll('select option')).map(o => ({v: o.value, t: o.text.trim()}))"
             )
             log(f"  Opciones en select: {[o['t'] for o in options[:10]]}")
-
-            suc = _cfg.sucursal_activa()
-            lista_erp = suc["tivendo_lista_erp"]
             match = next((o for o in options if lista_erp.upper() in o["t"].upper()), None)
             if not match:
                 # fallback: buscar por cualquier palabra clave de la lista
@@ -479,7 +533,7 @@ async def sincronizar():
             log(f"✓ Lista seleccionada: {match['t']}")
 
             # ── 5. EXPORTAR Y VERIFICAR PROPAGACIÓN ────────────────
-            max_exportaciones = 5 if PRECIOS_ESPERADOS else 1
+            max_exportaciones = 3 if PRECIOS_ESPERADOS else 1
             for intento_exportacion in range(1, max_exportaciones + 1):
                 with medidor.etapa("Exportar precios Tivendo"):
                     log(f"Haciendo clic en Exportar... (intento {intento_exportacion}/{max_exportaciones})")
@@ -510,6 +564,7 @@ async def sincronizar():
                     log(f"  {codigo}: esperado {esperado}, exportado {actual}")
 
                 if intento_exportacion == max_exportaciones:
+                    archivo_precio.unlink(missing_ok=True)
                     raise Exception(
                         "El ERP no actualizó los precios a tiempo; "
                         "se canceló la carga a Mercadohouse para no subir valores antiguos."
@@ -520,7 +575,10 @@ async def sincronizar():
                 log(f"Esperando {espera}s y volviendo a exportar la lista...")
                 await asyncio.sleep(espera)
 
-            log(f"✓ Archivo descargado: {nombre_archivo}")
+            archivo_final = Path(CARPETA_DESCARGA) / nombre_archivo
+            os.replace(ruta_archivo, archivo_final)
+            ruta_archivo = str(archivo_final)
+            log(f"✓ Archivo descargado y comprobado: {nombre_archivo}")
             log(f"  Guardado en: {ruta_archivo}")
             archivo_precio = Path(ruta_archivo)
             if not archivo_precio.exists():
@@ -565,19 +623,19 @@ async def sincronizar():
                 await esperar_confirmacion_carga_mercadohouse(page, log)
             log("✓ Lista cargada")
 
-            # ── 11. LIMPIAR CARPETA DE DESCARGAS ───────────────────
-            try:
-                n = limpiar_carpeta_archivos(CARPETA_DESCARGA)
-                log(f"🗑️  Carpeta limpiada: {n} archivo(s) eliminado(s)")
-            except Exception as e:
-                log(f"⚠️  No se pudo limpiar la carpeta: {e}")
-
             log("=" * 55)
             log("✅ SINCRONIZACIÓN COMPLETADA EXITOSAMENTE")
             log(f"   Local:   {_cfg.sucursal_activa()['mh_local']}")
             log("=" * 55)
 
+        except asyncio.CancelledError:
+            if 'ruta_archivo' in locals() and str(ruta_archivo).endswith('.pending'):
+                Path(ruta_archivo).unlink(missing_ok=True)
+            await browser.close()
+            raise
         except Exception as e:
+            if 'ruta_archivo' in locals() and str(ruta_archivo).endswith('.pending'):
+                Path(ruta_archivo).unlink(missing_ok=True)
             if isinstance(e, ErrorCredenciales):
                 await browser.close()
                 raise
@@ -586,7 +644,7 @@ async def sincronizar():
             await guardar_diagnostico(captura, e, log, "sync_precios", medidor)
             medidor.resumen()
             await browser.close()
-            sys.exit(1)
+            raise ErrorEtapaFuente("Precios", medidor.ultima_etapa or "Inicio", e) from e
 
         await browser.close()
         medidor.resumen()

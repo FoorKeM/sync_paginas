@@ -15,6 +15,13 @@ credenciales.json
 *secret*
 *clave*
 browser_session.json
+telegram_bot.json
+telegram_estado.json
+trabajo.lock
+telegram.lock
+telegram_control.json
+telegram_detener.json
+telegram_bot.log
 
 # Permitir pruebas que no contienen secretos reales
 !tests/test_credenciales.py

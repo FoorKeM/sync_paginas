@@ -9,8 +9,11 @@ import re
 import sys
 import time
 import unicodedata
+import uuid
+import zipfile
 from pathlib import Path
 from datetime import datetime
+from urllib.parse import urljoin, urlsplit
 from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 from app_paths import DATA_DIR, DIAG_DIR
 
@@ -96,14 +99,23 @@ async def guardar_sesion_contexto(context, log_fn=None) -> None:
 class MedidorEtapas:
     """Registra duracion de etapas sin usar esos tiempos para decidir esperas."""
 
-    def __init__(self, log_fn):
+    def __init__(self, log_fn, fuente="Sync"):
         self.log_fn = log_fn
+        self.fuente = fuente
         self.resultados = []
         self.etapa_actual = ""
         self.ultima_etapa = ""
 
     def etapa(self, nombre: str):
         return _EtapaMedida(self, nombre)
+
+    def informar_etapa(self, nombre: str):
+        self.ultima_etapa = nombre
+        try:
+            import telegram_bot
+            telegram_bot.actualizar_etapa(self.fuente, nombre)
+        except Exception:
+            pass  # El avance no debe detener una sincronización.
 
     def _agregar(self, nombre: str, segundos: float) -> None:
         self.resultados.append((nombre, segundos))
@@ -118,6 +130,13 @@ class MedidorEtapas:
         self.log_fn(f"  Total medido: {total:.1f}s")
 
 
+class ErrorEtapaFuente(RuntimeError):
+    def __init__(self, fuente, etapa, error):
+        self.fuente = fuente
+        self.etapa = etapa
+        super().__init__(f"{fuente}: falló en «{etapa}»: {error}")
+
+
 class _EtapaMedida:
     def __init__(self, medidor: MedidorEtapas, nombre: str):
         self.medidor = medidor
@@ -127,7 +146,7 @@ class _EtapaMedida:
     def __enter__(self):
         self.inicio = time.perf_counter()
         self.medidor.etapa_actual = self.nombre
-        self.medidor.ultima_etapa = self.nombre
+        self.medidor.informar_etapa(self.nombre)
         self.medidor.log_fn(f"Inicio etapa: {self.nombre}")
         return self
 
@@ -372,6 +391,191 @@ async def click_tarjeta_defontana(page, nombre: str) -> None:
     await page.locator('[data-mh-modulo]').click(timeout=10000)
 
 
+def _en_modulo(page, host: str) -> bool:
+    url = urlsplit(page.url)
+    return url.hostname == host and "/login" not in (url.path + url.fragment).lower()
+
+
+async def abrir_modulo_defontana(context, portal, nombre, host, controles, log_fn,
+                                url_directa=None, timeout=45000):
+    """Reutiliza la pestaña del módulo y confirma host más controles visibles."""
+    loop = asyncio.get_running_loop()
+    inicio = loop.time()
+    ultimo_clic = inicio - 10
+    paginas_iniciales = set(context.pages)
+    directa_usada = False
+    ultimo_error = None
+    while (loop.time() - inicio) * 1000 < timeout:
+        candidatas = [p for p in reversed(context.pages) if not p.is_closed()]
+        paginas_modulo = [p for p in candidatas if _en_modulo(p, host)]
+        for candidata in paginas_modulo:
+            for control in controles:
+                try:
+                    if await candidata.get_by_text(control, exact=True).first.is_visible():
+                        log_fn(f"✓ {nombre} confirmado en {host}: {control}")
+                        return candidata
+                except Exception as exc:
+                    ultimo_error = exc
+        # Una pestaña nueva todavía puede estar en about:blank mientras carga.
+        pestaña_pendiente = any(p not in paginas_iniciales and p.url in ("about:blank", "")
+                               for p in candidatas)
+        if not paginas_modulo and not pestaña_pendiente and loop.time() - ultimo_clic >= 8:
+            origen = next((p for p in candidatas if "portal.defontana.com" == urlsplit(p.url).hostname), None)
+            if origen:
+                ultimo_clic = loop.time()
+                log_fn(f"Abriendo {nombre} desde el portal...")
+                try:
+                    await click_tarjeta_defontana(origen, nombre)
+                except Exception as exc:
+                    ultimo_error = exc
+        if url_directa and not directa_usada and loop.time() - inicio >= 12 and not paginas_modulo:
+            directa_usada = True
+            log_fn(f"{nombre} sigue en el portal; abriendo dirección conocida en la misma sesión...")
+            try:
+                await portal.goto(url_directa, wait_until="domcontentloaded", timeout=15000)
+            except Exception as exc:
+                ultimo_error = exc
+        await asyncio.sleep(0.4)
+    detalle = f" Último error: {ultimo_error}" if ultimo_error else ""
+    raise RuntimeError(f"No se confirmó {nombre} en {host} con su menú visible.{detalle}")
+
+
+async def abrir_seccion_pos(page, nombre, log_fn, timeout=30000):
+    """Entra al listado y recupera su pantalla usando el href real del menú."""
+    enlace = page.get_by_role("link", name=nombre, exact=True)
+    if await enlace.count() == 0 or not await enlace.first.is_visible():
+        log_fn("Abriendo menú Artículos...")
+        await page.get_by_text("Artículos", exact=True).first.click()
+    await enlace.wait_for(state="visible", timeout=15000)
+    href = await enlace.get_attribute("href")
+    destino = urljoin(page.url, href) if href else None
+    if destino and urlsplit(destino).hostname != "tivendoapp.defontana.com":
+        destino = None
+    log_fn(f"Entrando al listado {nombre}...")
+    await enlace.click()
+    exportar = page.get_by_role("button", name="Exportar")
+    try:
+        if destino:
+            await page.wait_for_url(destino, timeout=15000)
+        log_fn("Esperando Exportar...")
+        await exportar.wait_for(state="visible", timeout=timeout)
+    except Exception:
+        if not destino:
+            raise
+        log_fn(f"No apareció Exportar; recuperando {nombre} desde su enlace real...")
+        await page.goto(destino, wait_until="domcontentloaded", timeout=30000)
+        await exportar.wait_for(state="visible", timeout=timeout)
+    return page
+
+
+def validar_excel_exportado(archivo: Path, nombre: str, leer_precios=None) -> None:
+    """Rechaza descargas vacías o truncadas antes de reemplazar un Excel previo."""
+    if not archivo.is_file() or archivo.stat().st_size < 100:
+        raise ValueError(f"{nombre}: Defontana entregó un archivo vacío o incompleto")
+    extension = Path(nombre).suffix.lower()
+    if extension == ".xlsx":
+        from openpyxl import load_workbook
+        with zipfile.ZipFile(archivo) as z:
+            if z.testzip() is not None:
+                raise ValueError(f"{nombre}: Excel comprimido incompleto")
+        with archivo.open("rb") as handle:
+            workbook = load_workbook(handle, read_only=True, data_only=True)
+            try:
+                valido = False
+                for hoja in workbook.worksheets:
+                    filas = (fila for fila in hoja.iter_rows(values_only=True)
+                             if any(valor is not None and str(valor).strip() for valor in fila))
+                    if next(filas, None) is not None and next(filas, None) is not None:
+                        valido = True
+                        break
+                if not valido:
+                    raise ValueError(f"{nombre}: Excel sin filas de datos")
+            finally:
+                workbook.close()
+    elif extension == ".xls":
+        with archivo.open("rb") as handle:
+            cabecera = handle.read(8192).lower()
+        if b"<table" not in cabecera and not cabecera.startswith(b"\xd0\xcf\x11\xe0"):
+            raise ValueError(f"{nombre}: formato XLS no reconocido")
+    else:
+        raise ValueError(f"{nombre}: se esperaba un archivo Excel")
+    if leer_precios is not None and not leer_precios(archivo):
+        raise ValueError(f"{nombre}: lista de precios sin artículos válidos")
+
+
+async def guardar_descarga_validada(download, carpeta, nombre_respaldo, log_fn,
+                                   leer_precios=None, provisional=False):
+    """Espera todos los bytes y sustituye el archivo anterior solo tras validarlo."""
+    carpeta = Path(carpeta)
+    carpeta.mkdir(parents=True, exist_ok=True)
+    nombre = Path(download.suggested_filename or nombre_respaldo).name
+    temporal = carpeta / f".mh_{uuid.uuid4().hex}.part"
+    destino = (carpeta / f".mh_{uuid.uuid4().hex}.pending") if provisional else carpeta / nombre
+    try:
+        fallo = await asyncio.wait_for(download.failure(), timeout=300)
+        if fallo:
+            raise RuntimeError(f"Defontana interrumpió la descarga: {fallo}")
+        log_fn(f"Comprobando archivo {nombre}...")
+        await asyncio.wait_for(download.save_as(str(temporal)), timeout=300)
+        validar_excel_exportado(temporal, nombre, leer_precios)
+        os.replace(temporal, destino)
+        log_fn(f"✓ Excel validado: {nombre}")
+        return nombre, str(destino)
+    finally:
+        temporal.unlink(missing_ok=True)
+
+
+async def exportar_excel_pos(page, carpeta, nombre_respaldo, log_fn):
+    """Escucha la página y los popups antes de Exportar; guarda tras validar."""
+    boton = page.get_by_role("button", name="Exportar")
+    await boton.wait_for(state="visible", timeout=30000)
+    recibido = asyncio.get_running_loop().create_future()
+    ventanas = []
+    tareas = []
+
+    def descarga_lista(download):
+        if not recibido.done():
+            recibido.set_result(download)
+
+    async def confirmar_ventana(ventana):
+        limite = asyncio.get_running_loop().time() + 15
+        while not recibido.done() and not ventana.is_closed() and asyncio.get_running_loop().time() < limite:
+            try:
+                confirmar = ventana.get_by_role("button", name="Exportar").first
+                if await confirmar.is_visible():
+                    await confirmar.click()
+                    return
+            except Exception:
+                pass
+            await asyncio.sleep(0.3)
+
+    def ventana_abierta(ventana):
+        ventanas.append(ventana)
+        ventana.on("download", descarga_lista)
+        tareas.append(asyncio.create_task(confirmar_ventana(ventana)))
+
+    page.on("download", descarga_lista)
+    page.on("popup", ventana_abierta)
+    try:
+        log_fn("Pulsando Exportar; esperando descarga directa o ventana de exportación...")
+        await boton.click()
+        download = await asyncio.wait_for(recibido, timeout=300)
+        log_fn("Descarga detectada; esperando y comprobando el Excel...")
+        return await guardar_descarga_validada(download, carpeta, nombre_respaldo, log_fn)
+    finally:
+        page.remove_listener("download", descarga_lista)
+        page.remove_listener("popup", ventana_abierta)
+        for ventana in ventanas:
+            ventana.remove_listener("download", descarga_lista)
+        for tarea in tareas:
+            tarea.cancel()
+        await asyncio.gather(*tareas, return_exceptions=True)
+        await asyncio.gather(*(v.close() for v in ventanas if not v.is_closed()),
+                             return_exceptions=True)
+        if not recibido.done():
+            recibido.cancel()
+
+
 async def asegurar_punto_ventas_abierto(context, page, log_fn):
     """Abre Tivendo POS desde el portal y verifica que la navegacion realmente ocurrio.
 
@@ -380,51 +584,9 @@ async def asegurar_punto_ventas_abierto(context, page, log_fn):
     falso positivo ahi (el portal tiene 'Revisa articulos de ayuda...' en el pie de
     pagina), haciendo creer que ya se entro a Tivendo POS cuando no es asi.
     """
-    if "portal.defontana.com" not in page.url:
-        return page
-
-    log_fn("Portal detectado. Haciendo clic en 'Punto de Ventas'...")
-    pos_page, nueva_pestana = await click_y_capturar_pagina(
-        context,
-        page,
-        lambda: click_tarjeta_defontana(page, "Punto de Ventas"),
-        timeout=6000,
+    return await abrir_modulo_defontana(
+        context, page, "Punto de Ventas", "tivendoapp.defontana.com", ("Artículos",), log_fn
     )
-    log_fn("Punto de Ventas abrio en pestana nueva" if nueva_pestana else "Punto de Ventas navego en la misma pestana")
-    await esperar_carga_ligera(pos_page)
-
-    limite = asyncio.get_event_loop().time() + 30
-    while asyncio.get_event_loop().time() < limite:
-        if "tivendoapp.defontana.com" in pos_page.url and "portal.defontana.com" not in pos_page.url:
-            log_fn(f"✓ Dentro de Tivendo POS — URL: {pos_page.url}")
-            return pos_page
-
-        try:
-            if await pos_page.get_by_text("Artículos", exact=True).first.is_visible(timeout=1000):
-                log_fn(f"✓ Dentro de Tivendo POS — URL: {pos_page.url}")
-                return pos_page
-        except Exception:
-            pass
-
-        if "portal.defontana.com" in pos_page.url:
-            try:
-                log_fn("  Aun en portal; reintentando clic en Punto de Ventas...")
-                nuevo_page, nueva = await click_y_capturar_pagina(
-                    context,
-                    pos_page,
-                    lambda: click_tarjeta_defontana(pos_page, "Punto de Ventas"),
-                    timeout=4000,
-                )
-                pos_page = nuevo_page
-                if nueva:
-                    log_fn("  Punto de Ventas abrio en una nueva pestana")
-                await esperar_carga_ligera(pos_page)
-            except Exception:
-                pass
-
-        await pausa_corta(0.8)
-
-    raise Exception(f"No se pudo abrir Tivendo POS desde el portal. URL actual: {pos_page.url}")
 
 
 async def ir_a_importadores_mercadohouse(page, nombre_tab: str, log_fn) -> None:
