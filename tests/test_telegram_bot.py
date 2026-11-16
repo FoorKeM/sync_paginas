@@ -21,6 +21,14 @@ def libre():
 
 
 class BotTests(unittest.IsolatedAsyncioTestCase):
+    async def test_menu_command_stays_available_beside_chat_input(self):
+        with patch.object(telegram_bot, "api", new_callable=AsyncMock) as api:
+            await telegram_bot.configurar_acceso_menu("test")
+        self.assertEqual(api.await_args_list[0].args[:2], ("test", "setMyCommands"))
+        self.assertEqual(api.await_args_list[0].args[2]["commands"][0]["command"], "menu")
+        self.assertEqual(api.await_args_list[1].args[:2], ("test", "setChatMenuButton"))
+        self.assertEqual(api.await_args_list[1].args[2]["menu_button"]["type"], "commands")
+
     async def test_bot_receives_excel_and_runs_manual_full_cycle_after_confirmation(self):
         config = {"token": "test", "chat_id": 10, "user_id": 20}
         filas = [["Código", "RangoInicial1", "RangoFinal1", "Precio1",
@@ -390,7 +398,8 @@ class BotTests(unittest.IsolatedAsyncioTestCase):
             bot.parar()
             return []
 
-        with patch.object(telegram_bot, "enviar", new_callable=AsyncMock), \
+        with patch.object(telegram_bot, "configurar_acceso_menu", new_callable=AsyncMock), \
+             patch.object(telegram_bot, "enviar", new_callable=AsyncMock), \
              patch.object(telegram_bot, "api", side_effect=responder):
             await bot.servir()
         self.assertTrue(bot.detener.is_set())
@@ -406,7 +415,8 @@ class BotTests(unittest.IsolatedAsyncioTestCase):
             detener = True
             return []
 
-        with patch.object(telegram_bot, "enviar", new_callable=AsyncMock), \
+        with patch.object(telegram_bot, "configurar_acceso_menu", new_callable=AsyncMock), \
+             patch.object(telegram_bot, "enviar", new_callable=AsyncMock), \
              patch.object(telegram_bot, "api", side_effect=responder):
             await bot.servir()
         self.assertTrue(detener)

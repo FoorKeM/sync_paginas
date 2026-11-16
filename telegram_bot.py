@@ -234,6 +234,14 @@ async def api(token, metodo, payload=None, timeout=35):
     return await asyncio.to_thread(_api_sync, token, metodo, payload or {}, timeout)
 
 
+async def configurar_acceso_menu(token):
+    """Deja /menu a mano junto al cuadro de escritura del chat."""
+    await api(token, "setMyCommands", {"commands": [
+        {"command": "menu", "description": "Abrir opciones de MHSync"},
+    ]})
+    await api(token, "setChatMenuButton", {"menu_button": {"type": "commands"}})
+
+
 def teclado():
     return {"inline_keyboard": [
         [{"text": "1. Subir precios (Excel)", "callback_data": "excel_upload"}],
@@ -826,6 +834,10 @@ class Bot:
 
     async def servir(self):
         print("  Bot de Telegram activo.")
+        try:
+            await configurar_acceso_menu(self.config["token"])
+        except RuntimeError:
+            print("  No se pudo configurar el botón de menú; se reintentará en el próximo inicio.")
         try:
             await self._respuesta("MHSync está conectado.\n" + texto_menu(), botones=True)
         except RuntimeError:
