@@ -473,12 +473,38 @@ class BotTests(unittest.IsolatedAsyncioTestCase):
             with patch.object(telegram_bot, "CONFIG_FILE", config_path), \
                  patch.object(telegram_bot.secrets, "token_hex", return_value="abc123"), \
                  patch.object(telegram_bot, "api", new_callable=AsyncMock, side_effect=replies), \
+                 patch.object(telegram_bot, "copiar_comando_vinculacion", return_value=True) as copiar, \
+                 patch.object(telegram_bot, "mostrar_qr_invitacion", return_value=True), \
                  patch.object(telegram_bot, "enviar", new_callable=AsyncMock) as enviar, \
                  patch("builtins.input", return_value="s"):
                 ok = await telegram_bot.configurar(lambda _prompt: "token-de-prueba")
             self.assertTrue(ok)
+            copiar.assert_called_once_with("ABC123")
             self.assertEqual(telegram_bot.json.loads(config_path.read_text(encoding="utf-8"))["user_id"], 20)
             enviar.assert_awaited_once()
+
+    async def test_pairing_accepts_qr_start_and_cancels_cleanly(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "telegram_bot.json"
+            replies = [{"username": "mi_mh_bot"},
+                       [{"update_id": 42, "message": {"text": "/start vincular_ABC123",
+                                                      "chat": {"id": 10, "type": "private"},
+                                                      "from": {"id": 20}}}]]
+            with patch.object(telegram_bot, "CONFIG_FILE", config_path), \
+                 patch.object(telegram_bot.secrets, "token_hex", return_value="abc123"), \
+                 patch.object(telegram_bot, "api", new_callable=AsyncMock, side_effect=replies), \
+                 patch.object(telegram_bot, "copiar_comando_vinculacion", return_value=True), \
+                 patch.object(telegram_bot, "mostrar_qr_invitacion", return_value=True), \
+                 patch.object(telegram_bot, "enviar", new_callable=AsyncMock), \
+                 patch("builtins.input", return_value="s"):
+                self.assertTrue(await telegram_bot.configurar(lambda _prompt: "token-de-prueba"))
+
+        with patch.object(telegram_bot, "api", new_callable=AsyncMock,
+                          side_effect=[{"username": "mi_mh_bot"}, asyncio.CancelledError]), \
+             patch.object(telegram_bot, "copiar_comando_vinculacion", return_value=True), \
+             patch.object(telegram_bot, "mostrar_qr_invitacion", return_value=True), \
+             redirect_stdout(StringIO()):
+            self.assertFalse(await telegram_bot.configurar(lambda _prompt: "token-de-prueba"))
 
     async def test_rejects_command_from_other_chat(self):
         config = {"token": "test", "chat_id": 10, "user_id": 20}
@@ -583,7 +609,7 @@ class LockTests(unittest.TestCase):
                     self.assertTrue(first)
                     self.assertFalse(second)
 
-    def test_startup_launcher_uses_current_exe_and_can_be_removed(self):
+    def test_startup_task_uses_current_exe_and_can_be_removed(self):
         from types import SimpleNamespace
 
         with tempfile.TemporaryDirectory() as tmp, \
@@ -598,13 +624,12 @@ class LockTests(unittest.TestCase):
                  SimpleNamespace(returncode=1), SimpleNamespace(returncode=0),
                  SimpleNamespace(returncode=0)]) as comando, \
              patch("builtins.input", side_effect=["s", "d"]):
-            launcher = Path(tmp) / "datos" / "MHSyncBotAdmin.vbs"
             menu.configurar_inicio_bot()
-            self.assertIn(" --tray", launcher.read_text(encoding="utf-8"))
-            self.assertNotIn("hidden", launcher.read_text(encoding="utf-8"))
             crear = comando.call_args_list[1].args[0]
             self.assertIn("/IT", crear)
             self.assertEqual(crear[crear.index("/RL") + 1], "HIGHEST")
+            self.assertEqual(crear[crear.index("/TR") + 1], f'"{(Path(tmp) / "MHSync.exe").resolve()}" --tray')
+            self.assertNotIn("wscript", " ".join(crear).lower())
             menu.configurar_inicio_bot()
             self.assertIn("/Delete", comando.call_args_list[-1].args[0])
 
@@ -628,7 +653,8 @@ class LockTests(unittest.TestCase):
             anterior.write_text("anterior", encoding="utf-8")
             menu.configurar_inicio_bot()
             self.assertFalse(anterior.exists())
-            self.assertIn(" --tray", (Path(tmp) / "datos" / "MHSyncBotAdmin.vbs").read_text(encoding="utf-8"))
+            self.assertIn(" --tray", comando.call_args_list[1].args[0][-1])
+            self.assertFalse((Path(tmp) / "datos" / "MHSyncBotAdmin.vbs").exists())
             self.assertIn("MHSyncBandeja", comando.call_args_list[2].args[0])
 
     def test_existing_bot_startup_can_be_upgraded_to_tray(self):
@@ -646,8 +672,24 @@ class LockTests(unittest.TestCase):
                  SimpleNamespace(returncode=1)]) as comando, \
              patch("builtins.input", return_value="a"):
             menu.configurar_inicio_bot()
-            self.assertIn(" --tray", (Path(tmp) / "datos" / "MHSyncBotAdmin.vbs").read_text(encoding="utf-8"))
+            self.assertIn(" --tray", comando.call_args_list[1].args[0][-1])
             self.assertIn("/Create", comando.call_args_list[1].args[0])
+
+    def test_startup_reports_task_scheduler_timeout(self):
+        from types import SimpleNamespace
+
+        with tempfile.TemporaryDirectory() as tmp, \
+             patch.dict(menu.os.environ, {"APPDATA": tmp}), \
+             patch.object(menu.sys, "frozen", True, create=True), \
+             patch.object(menu.sys, "executable", str(Path(tmp) / "MHSync.exe")), \
+             patch.object(menu, "USER_DATA_DIR", Path(tmp) / "datos"), \
+             patch.object(menu, "_es_administrador", return_value=True), \
+             patch.object(menu.telegram_bot, "cargar_config", return_value={"token": "test"}), \
+             patch.object(menu.subprocess, "run", side_effect=[
+                 SimpleNamespace(returncode=1), menu.subprocess.TimeoutExpired("schtasks", 45)]), \
+             patch("builtins.input", return_value="s"), redirect_stdout(StringIO()) as salida:
+            menu.configurar_inicio_bot()
+        self.assertIn("no respondió en 45 segundos", salida.getvalue())
 
     def test_tray_starts_bot_once_and_keeps_icon_available(self):
         with patch.object(menu, "_adquirir_instancia_unica", return_value=True), \

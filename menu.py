@@ -1654,6 +1654,11 @@ def iniciar_bandeja():
     """Mantiene el bot activo y ofrece abrir el menú desde el área de notificación."""
     if not _adquirir_instancia_unica("Local\\MercadohouseSyncBandeja"):
         return
+    if os.name == "nt" and getattr(sys, "frozen", False):
+        import ctypes
+        ventana = ctypes.windll.kernel32.GetConsoleWindow()
+        if ventana:
+            ctypes.windll.user32.ShowWindow(ventana, 0)
     import pystray
     from PIL import Image, ImageDraw
 
@@ -2006,23 +2011,23 @@ def configurar_inicio_bot():
         return
     if not existe and input("  ¿Iniciar bot y bandeja como administrador al entrar a Windows? (s/n): ").strip().lower() != "s":
         return
-    ruta_exe = str(Path(sys.executable).resolve()).replace('"', '""')
-    contenido = ('Set shell = CreateObject("WScript.Shell")\n'
-                 f'shell.Run Chr(34) & "{ruta_exe}" & Chr(34) & " --tray", 0, False\n')
-    lanzador = USER_DATA_DIR / "MHSyncBotAdmin.vbs"
-    lanzador.parent.mkdir(parents=True, exist_ok=True)
-    lanzador.write_text(contenido, encoding="utf-8")
+    ruta_exe = str(Path(sys.executable).resolve())
     comando = ["schtasks", "/Create", "/F", "/SC", "ONLOGON", "/IT",
                "/RL", "HIGHEST", "/TN", nombre_tarea,
-               "/TR", f'wscript.exe "{lanzador}"']
+               "/TR", f'"{ruta_exe}" --tray']
     try:
-        creado = subprocess.run(comando, capture_output=True, text=True, timeout=20)
-    except (OSError, subprocess.TimeoutExpired):
-        print("  Windows no pudo crear el inicio automático elevado.")
+        creado = subprocess.run(comando, capture_output=True, text=True, timeout=45)
+    except subprocess.TimeoutExpired:
+        print("  El Programador de tareas no respondió en 45 segundos. No se activó el inicio automático.")
+        return
+    except OSError as error:
+        print(f"  Windows no pudo abrir schtasks.exe: {error}.")
         return
     if creado.returncode != 0:
-        print("  Windows rechazó el inicio elevado. El inicio anterior sigue disponible.")
+        detalle = (creado.stderr or creado.stdout or "").strip().splitlines()
+        print("  Windows rechazó el inicio elevado: " + (detalle[0][:250] if detalle else f"código {creado.returncode}"))
         return
+    (USER_DATA_DIR / "MHSyncBotAdmin.vbs").unlink(missing_ok=True)
     inicio = (Path(os.environ["APPDATA"]) / "Microsoft" / "Windows" / "Start Menu"
               / "Programs" / "Startup" / "MHSyncTelegramBot.vbs")
     inicio.unlink(missing_ok=True)

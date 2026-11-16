@@ -5,6 +5,7 @@ import json
 import os
 import secrets
 import socket
+import subprocess
 import time
 import urllib.request
 import urllib.parse
@@ -138,6 +139,21 @@ def mostrar_qr_invitacion(bot_username, codigo):
     except ImportError:
         print("  El QR no está disponible en esta instalación; usa el enlace.")
     return True
+
+
+def copiar_comando_vinculacion(codigo):
+    """Deja el comando listo para pegar sin usar Ctrl+C dentro de la consola."""
+    if os.name != "nt":
+        return False
+    try:
+        resultado = subprocess.run(
+            ["clip.exe"], input=f"/vincular {codigo}", text=True,
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=5,
+            creationflags=subprocess.CREATE_NO_WINDOW,
+        )
+        return resultado.returncode == 0
+    except (OSError, subprocess.TimeoutExpired):
+        return False
 
 
 def guardar_estado(estado, **datos):
@@ -348,27 +364,46 @@ async def recibir_excel(config, documento):
 async def configurar(leer_token):
     print("\n  CONFIGURAR TELEGRAM")
     print("  Crea tu bot con @BotFather y copia su token.")
-    token = leer_token("  Token del bot (no se mostrará): ").strip()
+    try:
+        token = leer_token("  Token del bot (no se mostrará): ").strip()
+    except KeyboardInterrupt:
+        print("\n  Vinculación cancelada.")
+        return False
     if not token:
         print("  Cancelado.")
         return False
     try:
-        info = await api(token, "getMe")
+        info = await api(token, "getMe", timeout=10)
+    except asyncio.CancelledError:
+        tarea = asyncio.current_task()
+        if tarea:
+            tarea.uncancel()
+        print("\n  Vinculación cancelada.")
+        return False
     except RuntimeError as exc:
         print(f"  {exc}")
         return False
     codigo = secrets.token_hex(3).upper()
     print(f"  Bot comprobado: @{info.get('username', 'sin_nombre')}")
     print(f"  En Telegram, abre ese bot y envíale: /vincular {codigo}")
+    if copiar_comando_vinculacion(codigo):
+        print("  El comando ya está copiado. Pégalo en Telegram con Ctrl+V.")
+    mostrar_qr_invitacion(info.get("username", ""), codigo)
     print("  Esperando el mensaje durante dos minutos...")
     limite = asyncio.get_running_loop().time() + 120
     offset = None
     while asyncio.get_running_loop().time() < limite:
         try:
-            params = {"timeout": 10, "allowed_updates": ["message"]}
+            params = {"timeout": 3, "allowed_updates": ["message"]}
             if offset is not None:
                 params["offset"] = offset
-            updates = await api(token, "getUpdates", params, timeout=15)
+            updates = await api(token, "getUpdates", params, timeout=6)
+        except asyncio.CancelledError:
+            tarea = asyncio.current_task()
+            if tarea:
+                tarea.uncancel()
+            print("\n  Vinculación cancelada.")
+            return False
         except RuntimeError as exc:
             print(f"  {exc}")
             return False
@@ -377,13 +412,18 @@ async def configurar(leer_token):
             message = update.get("message") or {}
             chat = message.get("chat") or {}
             sender = message.get("from") or {}
-            if message.get("text", "").strip().upper() != f"/VINCULAR {codigo}":
+            if message.get("text", "").strip().upper() not in (
+                    f"/VINCULAR {codigo}", f"/START VINCULAR_{codigo}"):
                 continue
             if chat.get("type") != "private" or not isinstance(sender.get("id"), int):
                 continue
             nombre = sender.get("first_name") or "usuario"
             print(f"  Solicitud recibida de {nombre} (ID {sender['id']}).")
-            if input("  ¿Vincular este chat? (s/n): ").strip().lower() != "s":
+            try:
+                confirmado = input("  ¿Vincular este chat? (s/n): ").strip().lower() == "s"
+            except KeyboardInterrupt:
+                confirmado = False
+            if not confirmado:
                 print("  Cancelado.")
                 return False
             config = {"token": token, "chat_id": chat["id"], "user_id": sender["id"],
