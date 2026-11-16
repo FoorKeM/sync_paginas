@@ -119,9 +119,13 @@ def finalizar_instalacion_transitoria(input_fn=input, print_fn=print) -> None:
     destino = actual.with_name("MHSync.exe")
 
     if destino.exists():
-        try:
-            destino.unlink()
-        except OSError:
+        for _ in range(20):
+            try:
+                destino.unlink()
+                break
+            except OSError:
+                time.sleep(0.5)
+        if destino.exists():
             print_fn("  La versión anterior de MHSync sigue abierta o bloqueada.")
             try:
                 respuesta = input_fn("  ¿Cerrarla a la fuerza para completar la actualización? (s/n): ").strip().lower()
@@ -290,6 +294,20 @@ def aplicar_actualizacion_y_reiniciar(nuevo_exe: Path, nombre_final: str) -> Non
 
     exe_actual = Path(sys.executable).resolve()
     exe_destino = exe_actual.parent / nombre_final
+
+    if exe_actual.name.casefold() == "mhsync.exe" and nombre_final.casefold() == "mhsync.exe":
+        # El .bat corre oculto y su `start` puede dejar al programa sin consola
+        # interactiva. El instalador transitorio crea una consola propia.
+        instalador = exe_actual.with_name(NOMBRE_INSTALADOR_TRANSITORIO)
+        shutil.copy2(nuevo_exe, instalador)
+        subprocess.Popen(
+            [str(instalador)], cwd=str(exe_actual.parent),
+            env={**os.environ, "PYINSTALLER_RESET_ENVIRONMENT": "1"},
+            creationflags=subprocess.CREATE_NEW_CONSOLE,
+        )
+        sys.exit(0)
+        return
+
     proceso_esperado = "MHSync.exe" if nombre_final.casefold() == NOMBRE_INSTALADOR_TRANSITORIO.casefold() else nombre_final
     bat_path = exe_actual.parent / "_actualizar_mhsync.bat"
     log_path = DATA_DIR / "_actualizar_mhsync_log.txt"

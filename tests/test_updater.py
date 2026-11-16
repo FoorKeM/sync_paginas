@@ -125,6 +125,32 @@ class AplicarActualizacionTests(unittest.TestCase):
             with self.assertRaises(Exception):
                 updater.aplicar_actualizacion_y_reiniciar(None, "MHSync_V1.9.1.exe")
 
+    def test_fixed_release_uses_visible_transitional_installer(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            carpeta = Path(tmp)
+            viejo = carpeta / "MHSync.exe"
+            viejo.write_bytes(b"viejo")
+            nuevo = carpeta / "descargado.exe"
+            nuevo.write_bytes(b"nuevo")
+            with (
+                patch("updater.sys.frozen", create=True, new=True),
+                patch("updater.sys.executable", str(viejo)),
+                patch("updater.subprocess.Popen") as abrir,
+                patch("updater.sys.exit") as salir,
+            ):
+                updater.aplicar_actualizacion_y_reiniciar(nuevo, "MHSync.exe")
+
+            instalador = carpeta / "MHSync_Instalar.exe"
+            self.assertEqual(instalador.read_bytes(), b"nuevo")
+            self.assertEqual(viejo.read_bytes(), b"viejo")
+            self.assertEqual(abrir.call_args.args[0], [str(instalador.resolve())])
+            self.assertEqual(abrir.call_args.kwargs["creationflags"], updater.subprocess.CREATE_NEW_CONSOLE)
+            self.assertEqual(abrir.call_args.kwargs["env"]["PYINSTALLER_RESET_ENVIRONMENT"], "1")
+            self.assertFalse((carpeta / "_actualizar_mhsync.bat").exists())
+            salir.assert_called_once_with(0)
+
     def test_bat_script_replaces_versioned_exe_with_fixed_name(self):
         import tempfile
         from pathlib import Path
@@ -221,26 +247,65 @@ class LimpiezaActualizacionTests(unittest.TestCase):
             viejo = carpeta / "MHSync.exe"
             viejo.write_bytes(b"version antigua")
             unlink_real = Path.unlink
-            intento = {"n": 0}
+            estado = {"n": 0, "cerrado": False}
 
             def unlink_con_bloqueo(path, *args, **kwargs):
-                if path == viejo.resolve() and intento["n"] == 0:
-                    intento["n"] += 1
+                if path == viejo.resolve() and not estado["cerrado"]:
+                    estado["n"] += 1
                     raise PermissionError("en uso")
                 return unlink_real(path, *args, **kwargs)
+
+            def cerrar_viejo(_nombre):
+                estado["cerrado"] = True
+                return True
 
             with (
                 patch("updater.sys.frozen", create=True, new=True),
                 patch("updater.sys.executable", str(instalador)),
                 patch.object(Path, "unlink", unlink_con_bloqueo),
-                patch("updater.cerrar_ejecutable", return_value=True) as cerrar,
+                patch("updater.cerrar_ejecutable", side_effect=cerrar_viejo) as cerrar,
+                patch("updater.time.sleep"),
                 patch("updater.subprocess.Popen"),
                 patch("updater.sys.exit"),
             ):
                 updater.finalizar_instalacion_transitoria(input_fn=lambda _: "s")
 
             cerrar.assert_called_once_with("MHSync.exe")
+            self.assertEqual(estado["n"], 20)
             self.assertEqual(viejo.read_bytes(), b"version nueva")
+
+    def test_transitional_installer_waits_for_old_process_to_release_file(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            carpeta = Path(tmp)
+            instalador = carpeta / "MHSync_Instalar.exe"
+            instalador.write_bytes(b"version nueva")
+            viejo = carpeta / "MHSync.exe"
+            viejo.write_bytes(b"version antigua")
+            unlink_real = Path.unlink
+            intentos = {"n": 0}
+
+            def unlink_temporalmente_bloqueado(path, *args, **kwargs):
+                if path == viejo.resolve() and intentos["n"] < 3:
+                    intentos["n"] += 1
+                    raise PermissionError("en uso")
+                return unlink_real(path, *args, **kwargs)
+
+            with (
+                patch("updater.sys.frozen", create=True, new=True),
+                patch("updater.sys.executable", str(instalador)),
+                patch.object(Path, "unlink", unlink_temporalmente_bloqueado),
+                patch("updater.time.sleep"),
+                patch("updater.cerrar_ejecutable") as cerrar,
+                patch("updater.subprocess.Popen"),
+                patch("updater.sys.exit"),
+            ):
+                updater.finalizar_instalacion_transitoria(input_fn=lambda _: self.fail("No debe pedir confirmación"))
+
+            self.assertEqual(intentos["n"], 3)
+            self.assertEqual(viejo.read_bytes(), b"version nueva")
+            cerrar.assert_not_called()
 
     def test_final_exe_removes_transitional_installer_and_old_log(self):
         import tempfile
