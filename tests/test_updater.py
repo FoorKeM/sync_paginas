@@ -154,6 +154,7 @@ class AplicarActualizacionTests(unittest.TestCase):
             self.assertIn("MOVER_INTENTOS! lss 20", contenido)
             self.assertIn('start "" /D', contenido)
             self.assertIn('IMAGENAME eq MHSync.exe', contenido)
+            self.assertEqual(popen.call_args.kwargs["env"]["PYINSTALLER_RESET_ENVIRONMENT"], "1")
             self.assertIn('REABRIR_INTENTOS! lss 3', contenido)
             popen.assert_called_once()
             self.assertEqual(popen.call_args.kwargs["creationflags"], updater.subprocess.CREATE_NO_WINDOW)
@@ -207,6 +208,7 @@ class LimpiezaActualizacionTests(unittest.TestCase):
                 popen.call_args.args[0],
                 [str((carpeta / "MHSync.exe").resolve()), "--limpiar-instalador", str(instalador.resolve())],
             )
+            self.assertEqual(popen.call_args.kwargs["env"]["PYINSTALLER_RESET_ENVIRONMENT"], "1")
             exit_mock.assert_called_once_with(0)
 
     def test_transitional_installer_asks_before_forcing_old_process_closed(self):

@@ -142,6 +142,7 @@ def finalizar_instalacion_transitoria(input_fn=input, print_fn=print) -> None:
     shutil.copy2(actual, destino)
     subprocess.Popen(
         [str(destino), "--limpiar-instalador", str(actual)],
+        env={**os.environ, "PYINSTALLER_RESET_ENVIRONMENT": "1"},
         creationflags=subprocess.CREATE_NEW_CONSOLE,
     )
     log_anterior = actual.parent / "_actualizar_mhsync_log.txt"
@@ -349,5 +350,7 @@ def aplicar_actualizacion_y_reiniciar(nuevo_exe: Path, nombre_final: str) -> Non
         'del "%~f0"\r\n'
     )
     bat_path.write_text(bat_contenido, encoding="utf-8")
-    subprocess.Popen(["cmd", "/c", str(bat_path)], creationflags=subprocess.CREATE_NO_WINDOW)
+    subprocess.Popen(["cmd", "/c", str(bat_path)],
+                     env={**os.environ, "PYINSTALLER_RESET_ENVIRONMENT": "1"},
+                     creationflags=subprocess.CREATE_NO_WINDOW)
     sys.exit(0)

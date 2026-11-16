@@ -45,7 +45,8 @@ class ConfiguracionMenuTests(unittest.TestCase):
         with patch.object(menu, "tarea_hoy_info", return_value=""), redirect_stdout(salida):
             menu.banner()
         texto = salida.getvalue()
-        self.assertLess(texto.index("11.  CONFIGURACIÓN"), texto.index("12.  SALIR"))
+        self.assertLess(texto.index("11.  CONFIGURACIÓN"), texto.index("12.  OCULTAR EN BANDEJA"))
+        self.assertLess(texto.index("12.  OCULTAR EN BANDEJA"), texto.index("13.  SALIR"))
         self.assertNotIn("Telegram", texto)
         self.assertNotIn("Borrar sesión", texto)
 
@@ -57,7 +58,8 @@ class ConfiguracionMenuTests(unittest.TestCase):
         opciones = ["1.  UPLOAD PRECIOS", "2.  SYNC ARTÍCULOS", "3.  SYNC PRECIOS",
                     "4.  SYNC PACKS", "5.  SYNC ART + PRECIOS", "6.  SYNC PACKS + PRECIOS",
                     "7.  SYNC TODO", "8.  COMPLETO MANUAL", "9.  PROGRAMAR CAMBIO DE PRECIOS",
-                    "10.  AJUSTAR STOCK NEGATIVO", "11.  CONFIGURACIÓN", "12.  SALIR"]
+                    "10.  AJUSTAR STOCK NEGATIVO", "11.  CONFIGURACIÓN",
+                    "12.  OCULTAR EN BANDEJA", "13.  SALIR"]
         posiciones = [texto.index(opcion) for opcion in opciones]
         self.assertEqual(posiciones, sorted(posiciones))
         self.assertNotIn("Tivendo → MH", texto)
@@ -101,7 +103,7 @@ class PrincipalDispatchTests(unittest.IsolatedAsyncioTestCase):
              patch.object(menu, "esperar"), \
              patch.object(menu, "configurar_credenciales_iniciales", new_callable=AsyncMock), \
              patch.object(menu, "ejecutar_operacion", new_callable=AsyncMock) as ejecutar, \
-             patch("builtins.input", side_effect=["5", "6", "7", "8", "12"]):
+             patch("builtins.input", side_effect=["5", "6", "7", "8", "13"]):
             await menu.menu_principal()
         funciones = [llamada.args[1] for llamada in ejecutar.await_args_list]
         self.assertEqual(funciones, [menu.run_solo_sync, menu.run_packs_y_precios,
@@ -111,9 +113,17 @@ class PrincipalDispatchTests(unittest.IsolatedAsyncioTestCase):
         with patch.object(menu, "clear"), patch.object(menu, "banner"), \
              patch.object(menu, "configurar_credenciales_iniciales", new_callable=AsyncMock), \
              patch.object(menu, "menu_configuracion", new_callable=AsyncMock) as config, \
-             patch("builtins.input", side_effect=["11", "12"]):
+             patch("builtins.input", side_effect=["11", "13"]):
             await menu.menu_principal()
         config.assert_awaited_once()
+
+    async def test_send_to_tray_keeps_bot_active_and_exits_menu(self):
+        with patch.object(menu, "clear"), patch.object(menu, "banner"), \
+             patch.object(menu, "configurar_credenciales_iniciales", new_callable=AsyncMock), \
+             patch.object(menu, "iniciar_icono_bandeja", return_value=True) as icono, \
+             patch("builtins.input", return_value="12"):
+            await menu.menu_principal()
+        icono.assert_called_once()
 
 
 if __name__ == "__main__":

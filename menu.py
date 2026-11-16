@@ -12,6 +12,7 @@ import subprocess
 import re
 import os
 import signal
+import threading
 import time
 import zipfile
 from getpass import getpass
@@ -23,6 +24,18 @@ from trabajo_lock import bot_exclusivo, trabajo_exclusivo
 import telegram_bot
 
 HERE = APP_DIR
+TRAY_INFO_FILE = USER_DATA_DIR / "bandeja_info.txt"
+TRAY_OPEN_LOG = USER_DATA_DIR / "bandeja_apertura.log"
+_menu_bandeja_lock = threading.Lock()
+_menu_bandeja_proceso = None
+
+
+def _entorno_instancia_independiente():
+    """Evita que PyInstaller confunda otro MHSync.exe con su proceso auxiliar."""
+    entorno = os.environ.copy()
+    if getattr(sys, "frozen", False):
+        entorno["PYINSTALLER_RESET_ENVIRONMENT"] = "1"
+    return entorno
 sys.path.insert(0, str(HERE))
 configure_console_encoding()
 configure_playwright_browsers()
@@ -141,7 +154,8 @@ def banner():
     separador_menu()
     opcion("11", "CONFIGURACIÓN")
     separador_menu()
-    opcion("12", "SALIR")
+    opcion("12", "OCULTAR EN BANDEJA")
+    opcion("13", "SALIR")
     borde_menu("╚", "╝")
     info = tarea_hoy_info()
     if info:
@@ -1580,7 +1594,7 @@ async def menu_principal():
     while True:
         clear()
         banner()
-        op = input("  Elige una opción (1-12): ").strip()
+        op = input("  Elige una opción (1-13): ").strip()
 
         if op == "1":
             await ejecutar_operacion("Upload Precios", run_upload_manual_con_excel)
@@ -1615,6 +1629,11 @@ async def menu_principal():
         elif op == "11":
             await menu_configuracion()
         elif op == "12":
+            if iniciar_icono_bandeja():
+                print("\n  MHSync quedó en la bandeja. Abre el menú desde su icono.\n")
+                break
+            esperar()
+        elif op == "13":
             print("\n  Hasta luego! El bot seguirá activo en segundo plano.\n")
             break
         else:
@@ -1650,10 +1669,75 @@ def _adquirir_menu_unico() -> bool:
     return _adquirir_instancia_unica("Local\\MercadohouseSyncMenu")
 
 
+def abrir_menu_desde_bandeja() -> bool:
+    """Abre el menú con teclado y consola propios, sin heredar la salida del icono."""
+    global _menu_bandeja_proceso
+    try:
+        if os.name == "nt" and getattr(sys, "frozen", False):
+            import _winapi
+
+            with _menu_bandeja_lock:
+                if _menu_bandeja_proceso is not None:
+                    if _winapi.WaitForSingleObject(_menu_bandeja_proceso, 0) == _winapi.WAIT_TIMEOUT:
+                        return True
+                    _winapi.CloseHandle(_menu_bandeja_proceso)
+                    _menu_bandeja_proceso = None
+                if _instancia_activa("Local\\MercadohouseSyncMenu"):
+                    return True
+
+                inicio = subprocess.STARTUPINFO()
+                # No usar STARTF_USESTDHANDLES: el proceso de bandeja tiene stdin
+                # cerrado y stdout dirigido al log, que cerrarían el menú al leer.
+                inicio.dwFlags = 0
+                proceso, hilo, _, _ = _winapi.CreateProcess(
+                    sys.executable, subprocess.list2cmdline([sys.executable, "--tray-open"]),
+                    None, None, False, _winapi.CREATE_NEW_CONSOLE,
+                    _entorno_instancia_independiente(), str(APP_DIR), inicio,
+                )
+                _winapi.CloseHandle(hilo)
+                _menu_bandeja_proceso = proceso
+        else:
+            subprocess.Popen([sys.executable, str(HERE / "menu.py")], cwd=str(APP_DIR))
+        return True
+    except OSError as error:
+        print(f"No se pudo abrir MHSync desde la bandeja: {error}", flush=True)
+        if os.name == "nt":
+            try:
+                import ctypes
+                ctypes.windll.user32.MessageBoxW(
+                    None, f"No se pudo abrir MHSync:\n{error}", "MHSync", 0x10)
+            except (AttributeError, OSError):
+                pass
+        return False
+
+
+def _registrar_apertura_bandeja(mensaje):
+    try:
+        TRAY_OPEN_LOG.parent.mkdir(parents=True, exist_ok=True)
+        with TRAY_OPEN_LOG.open("a", encoding="utf-8") as registro:
+            registro.write(f"[{datetime.now():%Y-%m-%d %H:%M:%S}] {mensaje}\n")
+    except OSError:
+        pass
+
+
+def _conectar_consola_del_menu():
+    """Reconecta el menú al teclado y pantalla de su propia consola nueva."""
+    if os.name != "nt":
+        return
+    try:
+        sys.stdin = open("CONIN$", "r", encoding="utf-8", errors="replace")
+        sys.stdout = open("CONOUT$", "w", encoding="utf-8", errors="replace", buffering=1)
+        sys.stderr = open("CONOUT$", "w", encoding="utf-8", errors="replace", buffering=1)
+        _registrar_apertura_bandeja(f"Consola interactiva conectada; PID {os.getpid()}.")
+    except OSError as error:
+        _registrar_apertura_bandeja(f"No se pudo conectar CONIN$/CONOUT$: {error}.")
+        raise
+
+
 def iniciar_bandeja():
     """Mantiene el bot activo y ofrece abrir el menú desde el área de notificación."""
     if not _adquirir_instancia_unica("Local\\MercadohouseSyncBandeja"):
-        return
+        return False
     if os.name == "nt" and getattr(sys, "frozen", False):
         import ctypes
         ventana = ctypes.windll.kernel32.GetConsoleWindow()
@@ -1668,17 +1752,84 @@ def iniciar_bandeja():
     dibujo.text((12, 22), "MH", fill="#0a3152")
 
     def abrir(_icono, _opcion):
-        comando = [sys.executable] if getattr(sys, "frozen", False) else [sys.executable, str(HERE / "menu.py")]
-        subprocess.Popen(comando, cwd=str(HERE), creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0)
+        abrir_menu_desde_bandeja()
 
     def cerrar(_icono, _opcion):
         _icono.stop()  # El bot sigue activo; se controla desde el menú o Telegram.
 
-    icono = pystray.Icon("MHSync", imagen, "MHSync · bot de Telegram",
-                         pystray.Menu(pystray.MenuItem("Abrir MHSync", abrir, default=True),
+    icono = pystray.Icon("MHSync", imagen, f"MHSync {APP_VERSION} · bot de Telegram",
+                         pystray.Menu(pystray.MenuItem(f"Abrir MHSync ({APP_VERSION.split('-')[0]})", abrir, default=True),
                                       pystray.MenuItem("Cerrar icono (bot activo)", cerrar)))
-    asyncio.run(activar_bot_en_segundo_plano())
-    icono.run()
+    TRAY_INFO_FILE.parent.mkdir(parents=True, exist_ok=True)
+    TRAY_INFO_FILE.write_text(f"{APP_VERSION}\n{os.getpid()}\n", encoding="utf-8")
+    try:
+        asyncio.run(activar_bot_en_segundo_plano())
+        icono.run()
+    finally:
+        try:
+            if _leer_info_bandeja()[1] == os.getpid():
+                TRAY_INFO_FILE.unlink(missing_ok=True)
+        except OSError:
+            pass
+    return True
+
+
+def _leer_info_bandeja():
+    try:
+        version, pid = TRAY_INFO_FILE.read_text(encoding="utf-8").splitlines()[:2]
+        return version, int(pid)
+    except (OSError, ValueError, IndexError):
+        return "", None
+
+
+def _instancia_activa(nombre):
+    """Comprueba una instancia sin adquirir su bloqueo."""
+    if os.name != "nt":
+        return False
+    import ctypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.OpenMutexW.argtypes = (ctypes.c_uint, ctypes.c_int, ctypes.c_wchar_p)
+    kernel32.OpenMutexW.restype = ctypes.c_void_p
+    kernel32.CloseHandle.argtypes = (ctypes.c_void_p,)
+    kernel32.CloseHandle.restype = ctypes.c_int
+    handle = kernel32.OpenMutexW(0x00100000, False, nombre)
+    if handle:
+        kernel32.CloseHandle(handle)
+        return True
+    return ctypes.get_last_error() == 5  # un icono elevado puede negar el acceso
+
+
+def _icono_bandeja_activo():
+    return _instancia_activa("Local\\MercadohouseSyncBandeja")
+
+
+def iniciar_icono_bandeja() -> bool:
+    """Abre la bandeja en otro proceso para que cerrar el menú no detenga el bot."""
+    if os.name != "nt" or not getattr(sys, "frozen", False):
+        print("  La bandeja se usa desde MHSync.exe en Windows.")
+        return False
+    if _icono_bandeja_activo():
+        version, _ = _leer_info_bandeja()
+        if version == APP_VERSION:
+            return True
+        print("  Hay un icono de MHSync anterior. Ciérralo desde la bandeja y vuelve a elegir esta opción.")
+        return False
+    comando = [sys.executable, "--tray"]
+    telegram_bot.LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
+    log_bandeja = telegram_bot.LOG_FILE.with_name("bandeja.log")
+    try:
+        with log_bandeja.open("ab") as log:
+            proceso = subprocess.Popen(
+                comando, stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT,
+                cwd=str(APP_DIR),
+                env=_entorno_instancia_independiente(),
+                creationflags=subprocess.CREATE_NO_WINDOW | subprocess.CREATE_NEW_PROCESS_GROUP,
+            )
+        return True  # El icono aparece cuando termina de cargar el ejecutable.
+    except OSError as exc:
+        print(f"  No se pudo abrir la bandeja: {exc}")
+        return False
 
 
 async def ejecutar_desde_bot(clave, nombre):
@@ -1933,7 +2084,7 @@ async def activar_bot_en_segundo_plano():
                else [sys.executable, str(HERE / "menu.py"), "--bot"])
     telegram_bot.LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
     opciones = {"stdin": subprocess.DEVNULL, "stderr": subprocess.STDOUT,
-                "cwd": str(HERE)}
+                "cwd": str(HERE), "env": _entorno_instancia_independiente()}
     if os.name == "nt":
         opciones["creationflags"] = subprocess.CREATE_NO_WINDOW | subprocess.CREATE_NEW_PROCESS_GROUP
     else:
@@ -2046,8 +2197,13 @@ if __name__ == "__main__":
     elif "--bot" in sys.argv:
         asyncio.run(servir_bot())
     elif "--tray" in sys.argv:
-        iniciar_bandeja()
+        if not iniciar_bandeja():
+            sys.exit(0)  # Ya hay otro icono; el menú comprobará su versión.
     else:
+        desde_bandeja = "--tray-open" in sys.argv
+        if desde_bandeja:
+            _registrar_apertura_bandeja(f"Menú iniciado desde bandeja; versión {APP_VERSION}; PID {os.getpid()}.")
+            _conectar_consola_del_menu()
         if getattr(sys, "frozen", False) and _tiene_updater:
             if Path(sys.executable).name.casefold() == updater.NOMBRE_INSTALADOR_TRANSITORIO.casefold():
                 try:
@@ -2065,10 +2221,13 @@ if __name__ == "__main__":
                     if not updater.limpiar_instalador_transitorio(APP_DIR, Path(sys.argv[indice + 1])):
                         print("  ⚠️  No se pudo retirar el instalador temporal; puedes borrarlo después.")
         if not _adquirir_menu_unico():
-            print("  MHSync ya está abierto en otra ventana.")
-            try:
-                input("  Presiona ENTER para cerrar esta ventana...")
-            except EOFError:
-                pass
+            if desde_bandeja:
+                _registrar_apertura_bandeja("Otra ventana del menú conservaba la instancia única.")
+            # El acceso directo o un doble clic no deben dejar otra consola abierta.
             sys.exit(0)
-        asyncio.run(menu_principal())
+        try:
+            asyncio.run(menu_principal())
+        except Exception as error:
+            if desde_bandeja:
+                _registrar_apertura_bandeja(f"El menú terminó con {type(error).__name__}: {error}.")
+            raise

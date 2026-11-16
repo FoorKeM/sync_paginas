@@ -448,6 +448,7 @@ class BotTests(unittest.IsolatedAsyncioTestCase):
                 ok = await menu.activar_bot_en_segundo_plano()
             self.assertTrue(ok)
             self.assertIn("--bot", popen.call_args.args[0])
+            self.assertEqual(popen.call_args.kwargs["env"]["PYINSTALLER_RESET_ENVIRONMENT"], "1")
 
     async def test_option_18_requests_graceful_stop(self):
         @contextmanager
@@ -692,12 +693,101 @@ class LockTests(unittest.TestCase):
         self.assertIn("no respondió en 45 segundos", salida.getvalue())
 
     def test_tray_starts_bot_once_and_keeps_icon_available(self):
-        with patch.object(menu, "_adquirir_instancia_unica", return_value=True), \
+        with tempfile.TemporaryDirectory() as tmp, \
+             patch.object(menu, "TRAY_INFO_FILE", Path(tmp) / "bandeja_info.txt"), \
+             patch.object(menu, "_adquirir_instancia_unica", return_value=True), \
              patch.object(menu, "activar_bot_en_segundo_plano", new_callable=AsyncMock) as activar, \
              patch("pystray.Icon") as icono:
-            menu.iniciar_bandeja()
+            self.assertTrue(menu.iniciar_bandeja())
         activar.assert_awaited_once()
         icono.return_value.run.assert_called_once()
+
+    def test_tray_open_uses_new_console_without_inherited_handles(self):
+        import _winapi
+
+        with patch.object(menu.sys, "frozen", True, create=True), \
+             patch.object(menu.sys, "executable", "C:\\MHSync.exe"), \
+             patch.object(menu, "_menu_bandeja_proceso", None), \
+             patch.object(menu, "_instancia_activa", return_value=False), \
+             patch.object(_winapi, "CreateProcess", return_value=(1, 2, 123, 4)) as abrir, \
+             patch.object(_winapi, "CloseHandle"), \
+             patch.object(menu.subprocess, "Popen") as proceso:
+            self.assertTrue(menu.abrir_menu_desde_bandeja())
+        argumentos = abrir.call_args.args
+        self.assertEqual(argumentos[0], "C:\\MHSync.exe")
+        self.assertIn("--tray-open", argumentos[1])
+        self.assertFalse(argumentos[4])  # bInheritHandles
+        self.assertEqual(argumentos[5], _winapi.CREATE_NEW_CONSOLE)
+        self.assertEqual(argumentos[6]["PYINSTALLER_RESET_ENVIRONMENT"], "1")
+        self.assertEqual(argumentos[8].dwFlags, 0)  # sin STARTF_USESTDHANDLES
+        proceso.assert_not_called()
+
+    def test_tray_double_click_opens_only_one_menu(self):
+        import _winapi
+
+        with patch.object(menu.sys, "frozen", True, create=True), \
+             patch.object(menu.sys, "executable", "C:\\MHSync.exe"), \
+             patch.object(menu, "_menu_bandeja_proceso", None), \
+             patch.object(menu, "_instancia_activa", return_value=False), \
+             patch.object(_winapi, "CreateProcess", return_value=(11, 12, 123, 4)) as abrir, \
+             patch.object(_winapi, "WaitForSingleObject", return_value=_winapi.WAIT_TIMEOUT), \
+             patch.object(_winapi, "CloseHandle"):
+            self.assertTrue(menu.abrir_menu_desde_bandeja())
+            self.assertTrue(menu.abrir_menu_desde_bandeja())
+        abrir.assert_called_once()
+
+    def test_tray_does_not_open_another_existing_menu(self):
+        import _winapi
+
+        with patch.object(menu.sys, "frozen", True, create=True), \
+             patch.object(menu, "_menu_bandeja_proceso", None), \
+             patch.object(menu, "_instancia_activa", return_value=True), \
+             patch.object(_winapi, "CreateProcess") as abrir:
+            self.assertTrue(menu.abrir_menu_desde_bandeja())
+        abrir.assert_not_called()
+
+    def test_menu_opened_from_tray_reconnects_console_streams(self):
+        entrada, salida, errores = StringIO(), StringIO(), StringIO()
+        with patch.object(menu.sys, "stdin"), patch.object(menu.sys, "stdout"), \
+             patch.object(menu.sys, "stderr"), \
+             patch("builtins.open", side_effect=[entrada, salida, errores]) as abrir, \
+             patch.object(menu, "_registrar_apertura_bandeja"):
+            menu._conectar_consola_del_menu()
+            self.assertIs(menu.sys.stdin, entrada)
+            self.assertIs(menu.sys.stdout, salida)
+            self.assertIs(menu.sys.stderr, errores)
+        self.assertEqual([call.args[0] for call in abrir.call_args_list],
+                         ["CONIN$", "CONOUT$", "CONOUT$"])
+
+    def test_manual_tray_opens_separate_background_process(self):
+        with tempfile.TemporaryDirectory() as tmp, \
+             patch.object(menu.sys, "frozen", True, create=True), \
+             patch.object(menu.sys, "executable", "C:\\MHSync.exe"), \
+             patch.object(menu.telegram_bot, "LOG_FILE", Path(tmp) / "telegram_bot.log"), \
+             patch.object(menu, "_icono_bandeja_activo", return_value=False), \
+             patch.object(menu.subprocess, "Popen") as abrir:
+            self.assertTrue(menu.iniciar_icono_bandeja())
+        self.assertEqual(abrir.call_args.args[0], ["C:\\MHSync.exe", "--tray"])
+        self.assertEqual(abrir.call_args.kwargs["env"]["PYINSTALLER_RESET_ENVIRONMENT"], "1")
+        self.assertTrue(abrir.call_args.kwargs["creationflags"] & menu.subprocess.CREATE_NO_WINDOW)
+
+    def test_manual_tray_rejects_older_icon_instead_of_claiming_success(self):
+        with patch.object(menu.sys, "frozen", True, create=True), \
+             patch.object(menu, "_icono_bandeja_activo", return_value=True), \
+             patch.object(menu, "_leer_info_bandeja", return_value=("v1.9.70-2026-11-16", 123)), \
+             patch.object(menu.subprocess, "Popen") as abrir, \
+             redirect_stdout(StringIO()) as salida:
+            self.assertFalse(menu.iniciar_icono_bandeja())
+        self.assertIn("icono de MHSync anterior", salida.getvalue())
+        abrir.assert_not_called()
+
+    def test_manual_tray_reuses_icon_from_same_version(self):
+        with patch.object(menu.sys, "frozen", True, create=True), \
+             patch.object(menu, "_icono_bandeja_activo", return_value=True), \
+             patch.object(menu, "_leer_info_bandeja", return_value=(menu.APP_VERSION, 456)), \
+             patch.object(menu.subprocess, "Popen") as abrir:
+            self.assertTrue(menu.iniciar_icono_bandeja())
+        abrir.assert_not_called()
 
 
 if __name__ == "__main__":
