@@ -18,7 +18,6 @@ configure_playwright_browsers()
 from playwright.async_api import async_playwright
 from utils import (
     ErrorAccesoDefontana,
-    ErrorAccesoMercadohouse,
     ErrorCredenciales,
     ErrorEtapaFuente,
     abrir_seccion_pos,
@@ -131,7 +130,7 @@ async def sincronizar():
             await browser.close()
             raise
         except Exception as e:
-            if isinstance(e, (ErrorCredenciales, ErrorAccesoDefontana, ErrorAccesoMercadohouse)):
+            if isinstance(e, (ErrorCredenciales, ErrorAccesoDefontana)):
                 await browser.close()
                 raise
             log(f"❌ ERROR: {e}")

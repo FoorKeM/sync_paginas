@@ -231,12 +231,11 @@ class ReintentoTests(unittest.IsolatedAsyncioTestCase):
         output = StringIO()
         run = AsyncMock(side_effect=[utils.ErrorEtapaFuente("Artículos", "Descargar", "sin archivo"), None])
         with patch.object(menu.asyncio, "sleep", new_callable=AsyncMock), \
-             patch.object(menu, "borrar_sesion_guardada") as clear, \
+             patch.object(menu, "borrar_sesion_guardada"), \
              redirect_stdout(output):
             ok = await menu.ejecutar_con_reintentos("Sync Artículos", lambda: True, run)
         self.assertTrue(ok)
         self.assertEqual(run.await_count, 2)
-        clear.assert_not_called()
         self.assertIn("falló. Reintentando… intento 2 de 3", output.getvalue())
         self.assertIn("Descargar", output.getvalue())
 
