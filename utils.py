@@ -11,6 +11,7 @@ import time
 import unicodedata
 import uuid
 import zipfile
+from contextvars import ContextVar
 from pathlib import Path
 from datetime import datetime
 from urllib.parse import urljoin, urlsplit
@@ -21,6 +22,30 @@ from app_paths import DATA_DIR, DIAG_DIR
 EMPRESA_CORRECTA = "MERCADO HOUSE"
 SESSION_STATE_FILE = DATA_DIR / "browser_session.json"
 MODO_LIMPIO_ENV = "MERCADOHOUSE_SYNC_LIMPIO"
+_ACCESOS_OPERACION = ContextVar("mhsync_accesos_operacion", default=None)
+
+
+def iniciar_accesos_operacion():
+    """Comparte el límite de envíos entre fuentes de una misma operación."""
+    return _ACCESOS_OPERACION.set({"defontana_envios": 0, "mercadohouse_envios": 0,
+                                  "defontana_ok": False, "mercadohouse_ok": False})
+
+
+def restaurar_accesos_operacion(token):
+    _ACCESOS_OPERACION.reset(token)
+
+
+def accesos_operacion_activos() -> bool:
+    return _ACCESOS_OPERACION.get() is not None
+
+
+def marcar_clave_verificada(servicio: str) -> None:
+    """La clave nueva ya se comprobó una vez y su sesión quedó guardada."""
+    accesos = _ACCESOS_OPERACION.get()
+    if accesos is not None:
+        prefijo = "defontana" if servicio == "Tivendo" else "mercadohouse"
+        accesos[f"{prefijo}_envios"] = 1
+        accesos[f"{prefijo}_ok"] = True
 
 # ── Rotación de logs ──────────────────────────────────────────────────────────
 _MAX_LOG_BYTES = 512 * 1024  # 512 KB
@@ -88,7 +113,25 @@ def usar_modo_limpio() -> bool:
 async def guardar_sesion_contexto(context, log_fn=None) -> None:
     """Guarda cookies/localStorage del contexto actual para acelerar futuros logins."""
     try:
-        await context.storage_state(path=str(SESSION_STATE_FILE))
+        estado = await context.storage_state()
+        if SESSION_STATE_FILE.exists():
+            try:
+                anterior = json.loads(SESSION_STATE_FILE.read_text(encoding="utf-8"))
+                es_defontana = lambda dominio: str(dominio).lower().lstrip(".").endswith("defontana.com")
+                if not any(es_defontana(cookie.get("domain")) for cookie in estado.get("cookies", [])):
+                    estado.setdefault("cookies", []).extend(
+                        cookie for cookie in anterior.get("cookies", [])
+                        if es_defontana(cookie.get("domain"))
+                    )
+                if not any(es_defontana(urlsplit(origen.get("origin", "")).hostname)
+                           for origen in estado.get("origins", [])):
+                    estado.setdefault("origins", []).extend(
+                        origen for origen in anterior.get("origins", [])
+                        if es_defontana(urlsplit(origen.get("origin", "")).hostname)
+                    )
+            except (OSError, ValueError, TypeError):
+                pass
+        SESSION_STATE_FILE.write_text(json.dumps(estado, ensure_ascii=False), encoding="utf-8")
         if log_fn:
             log_fn("Sesion guardada actualizada.")
     except Exception as exc:
@@ -294,7 +337,9 @@ async def crear_pagina_trabajo(
         "accept_downloads": accept_downloads,
         "bypass_csp": bypass_csp,
     }
-    sesion_usada = not incognito and usar_sesion_guardada and SESSION_STATE_FILE.exists()
+    accesos = _ACCESOS_OPERACION.get()
+    reutilizar_acceso = bool(accesos and (accesos["defontana_ok"] or accesos["mercadohouse_ok"]))
+    sesion_usada = (reutilizar_acceso or (not incognito and usar_sesion_guardada)) and SESSION_STATE_FILE.exists()
     if sesion_usada:
         context_kwargs["storage_state"] = str(SESSION_STATE_FILE)
     try:
@@ -717,6 +762,10 @@ class ErrorAccesoDefontana(Exception):
     """El portal no confirmó el acceso; no repetir automáticamente el envío."""
 
 
+class ErrorAccesoMercadohouse(Exception):
+    """Mercadohouse no confirmó el acceso; no repetir automáticamente el envío."""
+
+
 def _es_panel_defontana(url: str) -> bool:
     destino = urlsplit(str(url))
     return destino.hostname == "portal.defontana.com" and destino.path.rstrip("/") == "/dashboard"
@@ -744,9 +793,15 @@ async def _contrasena_rechazada(page):
 async def login_tivendo(page, email: str, password: str, log_fn) -> None:
     """Inicia sesión en el portal Defontana para acceder a POS y ERP."""
     log_fn("Abriendo login del portal Defontana...")
-    await page.goto("https://portal.defontana.com/login", timeout=30000)
+    try:
+        await page.goto("https://portal.defontana.com/login", timeout=30000)
+    except Exception as error:
+        raise ErrorAccesoDefontana("No se pudo abrir el acceso al portal Defontana") from error
     await esperar_carga_ligera(page)
     if _es_panel_defontana(page.url):
+        accesos = _ACCESOS_OPERACION.get()
+        if accesos is not None:
+            accesos["defontana_ok"] = True
         log_fn("Sesión Defontana reutilizada")
         await guardar_sesion_contexto(page.context, log_fn)
         return
@@ -757,14 +812,25 @@ async def login_tivendo(page, email: str, password: str, log_fn) -> None:
         await page.locator('input[type="password"]').wait_for(state="visible", timeout=15000)
     except Exception as error:
         if _es_panel_defontana(page.url):
+            accesos = _ACCESOS_OPERACION.get()
+            if accesos is not None:
+                accesos["defontana_ok"] = True
             log_fn("Sesión Defontana reutilizada")
             await guardar_sesion_contexto(page.context, log_fn)
             return
         raise ErrorAccesoDefontana("El portal Defontana no mostró el formulario de acceso") from error
+    accesos = _ACCESOS_OPERACION.get()
+    if accesos is not None:
+        if accesos["defontana_envios"]:
+            raise ErrorAccesoDefontana("Defontana volvió a pedir la clave; se detuvo para evitar otro intento de acceso")
+        accesos["defontana_envios"] += 1
     log_fn("Ingresando credenciales en el portal Defontana...")
-    await page.locator('input:not([type="password"]):visible').first.fill(email)
-    await page.locator('input[type="password"]').fill(password)
-    await page.get_by_role("button", name="Confirmar", exact=True).click()
+    try:
+        await page.locator('input:not([type="password"]):visible').first.fill(email)
+        await page.locator('input[type="password"]').fill(password)
+        await page.get_by_role("button", name="Confirmar", exact=True).click()
+    except Exception as error:
+        raise ErrorAccesoDefontana("No se pudo completar el acceso al portal Defontana") from error
     log_fn("Esperando el panel Defontana...")
     try:
         await page.wait_for_url(_es_panel_defontana, timeout=20000)
@@ -775,6 +841,8 @@ async def login_tivendo(page, email: str, password: str, log_fn) -> None:
         if await _contrasena_rechazada(page):
             raise ErrorCredenciales("Tivendo")
         raise ErrorAccesoDefontana("El portal Defontana no confirmó el acceso; no se reintentará automáticamente")
+    if accesos is not None:
+        accesos["defontana_ok"] = True
     await guardar_sesion_contexto(page.context, log_fn)
     log_fn("✓ Acceso al portal Defontana comprobado")
 
@@ -783,15 +851,30 @@ async def login_mercadohouse(page, email: str, password: str, log_fn) -> None:
     """Login en mercadohouse.cl. Lanza Exception si falla."""
     log_fn("Abriendo login de Mercadohouse...")
     await page.goto("https://mercadohouse.cl/login", timeout=30000)
+    if "login" not in page.url.lower():
+        accesos = _ACCESOS_OPERACION.get()
+        if accesos is not None:
+            accesos["mercadohouse_ok"] = True
+        log_fn("Sesion Mercadohouse reutilizada")
+        await guardar_sesion_contexto(page.context, log_fn)
+        return
     try:
         await page.wait_for_selector("input", state="visible", timeout=8000)
     except Exception:
         await esperar_carga_ligera(page)
         if "login" not in page.url.lower():
+            accesos = _ACCESOS_OPERACION.get()
+            if accesos is not None:
+                accesos["mercadohouse_ok"] = True
             log_fn("Sesion Mercadohouse reutilizada")
             await guardar_sesion_contexto(page.context, log_fn)
             return
         await page.wait_for_selector("input", state="visible", timeout=15000)
+    accesos = _ACCESOS_OPERACION.get()
+    if accesos is not None:
+        if accesos["mercadohouse_envios"]:
+            raise ErrorAccesoMercadohouse("Mercadohouse volvió a pedir la clave; se detuvo para evitar otro intento de acceso")
+        accesos["mercadohouse_envios"] += 1
     log_fn("Ingresando credenciales Mercadohouse...")
     inputs = page.locator("input")
     await inputs.nth(0).click()
@@ -827,6 +910,8 @@ async def login_mercadohouse(page, email: str, password: str, log_fn) -> None:
             resumen = ""
         detalle = f": {resumen}" if resumen else ""
         raise Exception(f"Login Mercadohouse fallido{detalle}")
+    if accesos is not None:
+        accesos["mercadohouse_ok"] = True
     await guardar_sesion_contexto(page.context, log_fn)
     log_fn("✓ Login Mercadohouse exitoso")
 

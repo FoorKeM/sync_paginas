@@ -6,6 +6,7 @@ from unittest.mock import MagicMock
 from unittest.mock import AsyncMock, patch
 
 import menu
+import utils
 from utils import ErrorAccesoDefontana, ErrorCredenciales, _contrasena_rechazada, login_tivendo
 
 
@@ -160,6 +161,89 @@ class PortalDefontanaTests(unittest.IsolatedAsyncioTestCase):
             self.assertFalse(await menu.ejecutar_con_reintentos("Sync Precios", lambda: True, run))
         self.assertEqual(run.await_count, 1)
         clear.assert_not_called()
+
+    async def test_later_source_does_not_send_defontana_password_again(self):
+        first = self._page()
+        async def redirect(_predicate, **_kwargs):
+            first.url = "https://portal.defontana.com/dashboard"
+        first.wait_for_url.side_effect = redirect
+        second = self._page()
+        token = utils.iniciar_accesos_operacion()
+        try:
+            with patch("utils.esperar_carga_ligera", new_callable=AsyncMock), \
+                 patch("utils.guardar_sesion_contexto", new_callable=AsyncMock):
+                await login_tivendo(first, "test@example.com", "dummy-key", lambda _: None)
+                with self.assertRaisesRegex(ErrorAccesoDefontana, "evitar otro intento"):
+                    await login_tivendo(second, "test@example.com", "dummy-key", lambda _: None)
+        finally:
+            utils.restaurar_accesos_operacion(token)
+        self.assertEqual(first.get_by_role.return_value.click.await_count, 1)
+        second.get_by_role.assert_not_called()
+        second.locator.return_value.first.fill.assert_not_awaited()
+
+    async def test_retry_restores_saved_session_in_new_incognito_context(self):
+        import tempfile
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as temp:
+            state_file = Path(temp) / "session.json"
+            state_file.write_text("{}", encoding="utf-8")
+            browser = MagicMock()
+            browser.new_context = AsyncMock()
+            browser.new_context.return_value.new_page = AsyncMock()
+            token = utils.iniciar_accesos_operacion()
+            try:
+                utils.marcar_clave_verificada("Tivendo")
+                with patch.object(utils, "SESSION_STATE_FILE", state_file), \
+                     patch.object(utils, "launch_chromium", new_callable=AsyncMock, return_value=browser):
+                    await utils.crear_pagina_trabajo(MagicMock(), incognito=True)
+            finally:
+                utils.restaurar_accesos_operacion(token)
+        self.assertEqual(browser.new_context.await_args.kwargs["storage_state"], str(state_file))
+
+    async def test_later_stage_retries_without_resubmitting_password(self):
+        first = self._page()
+        async def first_redirect(_predicate, **_kwargs):
+            first.url = "https://portal.defontana.com/dashboard"
+        first.wait_for_url.side_effect = first_redirect
+        retry = self._page()
+        async def retry_goto(_url, **_kwargs):
+            retry.url = "https://portal.defontana.com/dashboard"
+        retry.goto.side_effect = retry_goto
+        attempts = 0
+        async def run():
+            nonlocal attempts
+            attempts += 1
+            await login_tivendo(first if attempts == 1 else retry,
+                                "test@example.com", "dummy-key", lambda _: None)
+            if attempts == 1:
+                raise utils.ErrorEtapaFuente("Artículos", "Exportar", "Archivo incompleto")
+        with patch("utils.esperar_carga_ligera", new_callable=AsyncMock), \
+             patch("utils.guardar_sesion_contexto", new_callable=AsyncMock), \
+             patch.object(menu.asyncio, "sleep", new_callable=AsyncMock), \
+             patch.object(menu, "borrar_sesion_guardada") as clear:
+            self.assertTrue(await menu.ejecutar_con_reintentos("Sync Artículos", lambda: True, run))
+        self.assertEqual(attempts, 2)
+        self.assertEqual(first.get_by_role.return_value.click.await_count, 1)
+        retry.get_by_role.assert_not_called()
+        clear.assert_not_called()
+
+    async def test_saving_mercadohouse_session_keeps_defontana_cookies(self):
+        import json
+        import tempfile
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as temp:
+            state_file = Path(temp) / "session.json"
+            state_file.write_text(json.dumps({"cookies": [
+                {"name": "portal", "domain": ".defontana.com", "path": "/", "value": "test"}
+            ], "origins": []}), encoding="utf-8")
+            context = MagicMock()
+            context.storage_state = AsyncMock(return_value={"cookies": [
+                {"name": "mh", "domain": "mercadohouse.cl", "path": "/", "value": "test"}
+            ], "origins": []})
+            with patch.object(utils, "SESSION_STATE_FILE", state_file):
+                await utils.guardar_sesion_contexto(context)
+            saved = json.loads(state_file.read_text(encoding="utf-8"))
+        self.assertEqual({cookie["name"] for cookie in saved["cookies"]}, {"portal", "mh"})
 
 
 if __name__ == "__main__":

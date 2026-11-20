@@ -20,6 +20,7 @@ configure_playwright_browsers()
 from playwright.async_api import async_playwright
 from utils import (
     ErrorAccesoDefontana,
+    ErrorAccesoMercadohouse,
     ErrorCredenciales,
     ErrorEtapaFuente,
     abrir_seccion_pos,
@@ -155,7 +156,7 @@ async def exportar_packs():
             await browser.close()
             raise
         except Exception as e:
-            if isinstance(e, (ErrorCredenciales, ErrorAccesoDefontana)):
+            if isinstance(e, (ErrorCredenciales, ErrorAccesoDefontana, ErrorAccesoMercadohouse)):
                 await browser.close()
                 raise
             log(f"ERROR: {e}")

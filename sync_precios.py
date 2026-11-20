@@ -24,6 +24,7 @@ from playwright.async_api import TimeoutError as PlaywrightTimeoutError, async_p
 import config as _cfg
 from utils import (
     ErrorAccesoDefontana,
+    ErrorAccesoMercadohouse,
     ErrorCredenciales,
     ErrorEtapaFuente,
     abrir_modulo_defontana,
@@ -637,7 +638,7 @@ async def sincronizar():
         except Exception as e:
             if 'ruta_archivo' in locals() and str(ruta_archivo).endswith('.pending'):
                 Path(ruta_archivo).unlink(missing_ok=True)
-            if isinstance(e, (ErrorCredenciales, ErrorAccesoDefontana)):
+            if isinstance(e, (ErrorCredenciales, ErrorAccesoDefontana, ErrorAccesoMercadohouse)):
                 await browser.close()
                 raise
             log(f"❌ ERROR: {e}")

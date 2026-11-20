@@ -19,7 +19,12 @@ from getpass import getpass
 from pathlib import Path
 from datetime import datetime, date
 from app_paths import APP_DIR, USER_DATA_DIR, configure_console_encoding, configure_playwright_browsers, runtime_path
-from utils import MODO_LIMPIO_ENV, ErrorAccesoDefontana, ErrorCredenciales, borrar_sesion_guardada, crear_pagina_trabajo, login_tivendo, login_mercadohouse
+from utils import (
+    MODO_LIMPIO_ENV, ErrorAccesoDefontana, ErrorAccesoMercadohouse,
+    ErrorCredenciales, accesos_operacion_activos, borrar_sesion_guardada,
+    crear_pagina_trabajo, iniciar_accesos_operacion, login_tivendo,
+    login_mercadohouse, marcar_clave_verificada, restaurar_accesos_operacion,
+)
 from trabajo_lock import bot_exclusivo, trabajo_exclusivo
 import telegram_bot
 
@@ -395,6 +400,7 @@ async def ejecutar_operacion(nombre, fn, origen="Menú"):
                 pass
             return False
         anterior = _resultados_operacion
+        token_accesos = iniciar_accesos_operacion()
         _resultados_operacion = []
         _fuente_cancelada = False
         telegram_bot.guardar_estado("En curso", tarea=nombre, origen=origen)
@@ -449,12 +455,14 @@ async def ejecutar_operacion(nombre, fn, origen="Menú"):
             raise
         finally:
             _resultados_operacion = anterior
+            restaurar_accesos_operacion(token_accesos)
 
 async def ejecutar_con_reintentos(nombre, fn_check, fn_run, permitir_correccion=True):
     """Ctrl+C cancela la fuente actual y devuelve el control al menú."""
     global _fuente_cancelada, _ultimo_error_fuente
     _fuente_cancelada = False
     _ultimo_error_fuente = ""
+    token_accesos = None if accesos_operacion_activos() else iniciar_accesos_operacion()
     tarea = asyncio.current_task()
     anterior = signal.getsignal(signal.SIGINT)
     instalado = False
@@ -483,6 +491,8 @@ async def ejecutar_con_reintentos(nombre, fn_check, fn_run, permitir_correccion=
     finally:
         if instalado:
             signal.signal(signal.SIGINT, anterior)
+        if token_accesos is not None:
+            restaurar_accesos_operacion(token_accesos)
 
 
 async def _ejecutar_con_reintentos_impl(nombre, fn_check, fn_run, permitir_correccion=True):
@@ -494,7 +504,7 @@ async def _ejecutar_con_reintentos_impl(nombre, fn_check, fn_run, permitir_corre
         return False
 
     for intento in range(1, MAX_REINTENTOS + 1):
-        os.environ[MODO_LIMPIO_ENV] = "1" if intento > 1 else "0"
+        os.environ[MODO_LIMPIO_ENV] = "0"
         if intento == 1:
             telegram_bot.actualizar_etapa(nombre, "Iniciando")
         if intento > 1:
@@ -502,8 +512,7 @@ async def _ejecutar_con_reintentos_impl(nombre, fn_check, fn_run, permitir_corre
                 nombre, f"Reintentando ({intento}/{MAX_REINTENTOS}); espera de {ESPERA_REINTENTO}s"
             )
             print(f"\n  🔄  Reintentando {nombre}... (intento {intento}/{MAX_REINTENTOS})")
-            print("      Borrando sesion guardada para entrar limpio...")
-            borrar_sesion_guardada()
+            print("      Reutilizando la sesión guardada; la clave no se enviará otra vez...")
             print(f"      Esperando {ESPERA_REINTENTO}s antes de reintentar...")
             await asyncio.sleep(ESPERA_REINTENTO)
         try:
@@ -530,10 +539,9 @@ async def _ejecutar_con_reintentos_impl(nombre, fn_check, fn_run, permitir_corre
                 print(f"  ❌  {nombre}: contraseña incorrecta de {error.servicio}. Abre MHSync para cambiarla.")
                 return False
             if await corregir_contrasena(error.servicio):
-                borrar_sesion_guardada()
                 return await _ejecutar_con_reintentos_impl(nombre, fn_check, fn_run, permitir_correccion=False)
             return False
-        except ErrorAccesoDefontana as error:
+        except (ErrorAccesoDefontana, ErrorAccesoMercadohouse) as error:
             _ultimo_error_fuente = str(error)
             os.environ.pop(MODO_LIMPIO_ENV, None)
             print(f"  ❌  {nombre}: {error}")
@@ -683,7 +691,6 @@ async def run_stock_negativo(permitir_correccion=True):
         ok = await stock_negativo.ejecutar_ajuste_completo(confirmar_fn=_confirmar_ajuste_stock_negativo)
     except ErrorCredenciales as error:
         if permitir_correccion and await corregir_contrasena(error.servicio):
-            borrar_sesion_guardada()
             return await run_stock_negativo(permitir_correccion=False)
         return False
     except Exception as e:
@@ -1389,15 +1396,19 @@ def leer_contrasena(prompt):
 
 async def verificar_credencial(servicio, correo, clave):
     from playwright.async_api import async_playwright
-    async with async_playwright() as p:
-        browser, _, page = await crear_pagina_trabajo(p, incognito=True)
-        try:
-            if servicio == "Tivendo":
-                await login_tivendo(page, correo, clave, lambda _: None)
-            else:
-                await login_mercadohouse(page, correo, clave, lambda _: None)
-        finally:
-            await browser.close()
+    token_accesos = iniciar_accesos_operacion()
+    try:
+        async with async_playwright() as p:
+            browser, _, page = await crear_pagina_trabajo(p, incognito=True)
+            try:
+                if servicio == "Tivendo":
+                    await login_tivendo(page, correo, clave, lambda _: None)
+                else:
+                    await login_mercadohouse(page, correo, clave, lambda _: None)
+            finally:
+                await browser.close()
+    finally:
+        restaurar_accesos_operacion(token_accesos)
 
 
 async def configurar_credenciales_iniciales():
@@ -1460,6 +1471,7 @@ async def corregir_contrasena(servicio):
         return False
     datos[prefijo + "_PASSWORD"] = clave
     _guardar_credenciales(datos["TIVENDO_EMAIL"], datos["TIVENDO_PASSWORD"], datos["MH_EMAIL"], datos["MH_PASSWORD"])
+    marcar_clave_verificada(servicio)
     print("  ✅  Nueva contraseña comprobada y guardada. Reintentando la tarea...\n")
     return True
 
