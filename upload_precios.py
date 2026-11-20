@@ -23,6 +23,7 @@ configure_playwright_browsers()
 from playwright.async_api import async_playwright
 import config as _cfg
 from utils import (
+    ErrorAccesoDefontana,
     ErrorCredenciales,
     asegurar_empresa_mercadohouse,
     asegurar_punto_ventas_abierto,
@@ -683,8 +684,7 @@ async def subir_precios():
                 await asegurar_empresa_mercadohouse(page, log, EMAIL, PASSWORD)
                 page = await asegurar_punto_ventas_abierto(context, page, log)
                 if "login" in page.url.lower():
-                    log("Punto de Ventas pidio login nuevamente; reingresando...")
-                    await login_tivendo(page, EMAIL, PASSWORD, log)
+                    raise ErrorAccesoDefontana("Punto de Ventas volvió al login después de acceder por el portal")
 
             # ── 3. NAVEGAR A LISTAS DE PRECIOS ─────────────────────
             with medidor.etapa("Cargar listas de precios Tivendo"):
@@ -695,15 +695,7 @@ async def subir_precios():
                 )
                 await esperar_carga_ligera(page)
                 if "login" in page.url.lower():
-                    log("Listas de precios redirigio a login; reingresando y reintentando...")
-                    await login_tivendo(page, EMAIL, PASSWORD, log)
-                    await page.goto(
-                        "https://tivendoapp.defontana.com/configuracion/listas_precios",
-                        timeout=30000
-                    )
-                    await esperar_carga_ligera(page)
-                if "login" in page.url.lower():
-                    raise Exception("No se pudo entrar a Listas de precios: Tivendo volvio al login")
+                    raise ErrorAccesoDefontana("Listas de precios volvió al login después de acceder por el portal")
                 await page.locator("table tbody tr").first.wait_for(state="visible", timeout=45000)
 
             # ── 4. ENCONTRAR LA FILA DE LA LISTA CORRECTA ──────────
@@ -814,7 +806,7 @@ async def subir_precios():
                 log(f"⚠️  Se conserva {excel_path.name} para revisar y reintentar los precios rechazados.")
 
         except Exception as e:
-            if isinstance(e, ErrorCredenciales):
+            if isinstance(e, (ErrorCredenciales, ErrorAccesoDefontana)):
                 await browser.close()
                 raise
             log(f"❌ ERROR: {e}")

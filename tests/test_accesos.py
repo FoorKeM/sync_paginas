@@ -6,7 +6,7 @@ from unittest.mock import MagicMock
 from unittest.mock import AsyncMock, patch
 
 import menu
-from utils import ErrorCredenciales, _contrasena_rechazada
+from utils import ErrorAccesoDefontana, ErrorCredenciales, _contrasena_rechazada, login_tivendo
 
 
 class PasswordInputTests(unittest.TestCase):
@@ -108,6 +108,58 @@ class CredentialFlowTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(await _contrasena_rechazada(page))
         page.locator.return_value.inner_text = AsyncMock(return_value="Ocurrió un error de conexión")
         self.assertFalse(await _contrasena_rechazada(page))
+
+
+class PortalDefontanaTests(unittest.IsolatedAsyncioTestCase):
+    def _page(self):
+        page = MagicMock()
+        page.url = "https://portal.defontana.com/login"
+        page.goto = AsyncMock()
+        page.locator.return_value.wait_for = AsyncMock()
+        page.locator.return_value.fill = AsyncMock()
+        page.locator.return_value.first.fill = AsyncMock()
+        page.get_by_role.return_value.click = AsyncMock()
+        page.wait_for_url = AsyncMock()
+        return page
+
+    async def test_login_uses_portal_and_confirms_dashboard(self):
+        page = self._page()
+        async def redirect(_predicate, **_kwargs):
+            page.url = "https://portal.defontana.com/dashboard"
+        page.wait_for_url.side_effect = redirect
+        with patch("utils.esperar_carga_ligera", new_callable=AsyncMock), \
+             patch("utils.guardar_sesion_contexto", new_callable=AsyncMock) as save:
+            await login_tivendo(page, "test@example.com", "dummy-key", lambda _: None)
+        page.goto.assert_awaited_once_with("https://portal.defontana.com/login", timeout=30000)
+        page.get_by_role.assert_called_once_with("button", name="Confirmar", exact=True)
+        self.assertEqual(page.locator.return_value.first.fill.await_args.args, ("test@example.com",))
+        save.assert_awaited_once()
+
+    async def test_existing_session_does_not_submit_credentials(self):
+        page = self._page()
+        async def goto(_url, **_kwargs):
+            page.url = "https://portal.defontana.com/dashboard"
+        page.goto.side_effect = goto
+        with patch("utils.esperar_carga_ligera", new_callable=AsyncMock), \
+             patch("utils.guardar_sesion_contexto", new_callable=AsyncMock):
+            await login_tivendo(page, "test@example.com", "dummy-key", lambda _: None)
+        page.get_by_role.assert_not_called()
+
+    async def test_unconfirmed_login_fails_without_second_submit(self):
+        page = self._page()
+        page.wait_for_url.side_effect = TimeoutError()
+        page.locator.return_value.inner_text = AsyncMock(return_value="Ocurrió un error de conexión")
+        with patch("utils.esperar_carga_ligera", new_callable=AsyncMock):
+            with self.assertRaises(ErrorAccesoDefontana):
+                await login_tivendo(page, "test@example.com", "dummy-key", lambda _: None)
+        self.assertEqual(page.get_by_role.return_value.click.await_count, 1)
+
+    async def test_unconfirmed_login_is_not_retried_by_menu(self):
+        run = AsyncMock(side_effect=ErrorAccesoDefontana("Sin panel confirmado"))
+        with patch.object(menu, "borrar_sesion_guardada") as clear:
+            self.assertFalse(await menu.ejecutar_con_reintentos("Sync Precios", lambda: True, run))
+        self.assertEqual(run.await_count, 1)
+        clear.assert_not_called()
 
 
 if __name__ == "__main__":

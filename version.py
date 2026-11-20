@@ -1,2 +1,2 @@
-APP_VERSION = "v1.9.75-2026-11-16"
+APP_VERSION = "v1.9.76-2026-11-20"
 APP_NAME = "MercadohouseSync"

@@ -713,6 +713,15 @@ class ErrorCredenciales(Exception):
         super().__init__(f"Contraseña incorrecta para {servicio}")
 
 
+class ErrorAccesoDefontana(Exception):
+    """El portal no confirmó el acceso; no repetir automáticamente el envío."""
+
+
+def _es_panel_defontana(url: str) -> bool:
+    destino = urlsplit(str(url))
+    return destino.hostname == "portal.defontana.com" and destino.path.rstrip("/") == "/dashboard"
+
+
 async def _contrasena_rechazada(page):
     """Reconoce mensajes explícitos de credenciales incorrectas."""
     try:
@@ -733,39 +742,41 @@ async def _contrasena_rechazada(page):
 
 
 async def login_tivendo(page, email: str, password: str, log_fn) -> None:
-    """Login en tivendoapp.defontana.com. Lanza Exception si falla."""
-    log_fn("Abriendo login de Tivendo...")
-    await page.goto("https://tivendoapp.defontana.com/login", timeout=30000)
+    """Inicia sesión en el portal Defontana para acceder a POS y ERP."""
+    log_fn("Abriendo login del portal Defontana...")
+    await page.goto("https://portal.defontana.com/login", timeout=30000)
+    await esperar_carga_ligera(page)
+    if _es_panel_defontana(page.url):
+        log_fn("Sesión Defontana reutilizada")
+        await guardar_sesion_contexto(page.context, log_fn)
+        return
+    destino = urlsplit(page.url)
+    if destino.hostname != "portal.defontana.com" or destino.path.rstrip("/") != "/login":
+        raise ErrorAccesoDefontana("El portal Defontana no mostró el inicio de sesión ni su panel")
     try:
-        await page.wait_for_selector("input", state="visible", timeout=10000)
-    except Exception:
-        await esperar_carga_ligera(page)
-        if "login" not in page.url.lower():
-            log_fn("Sesion Tivendo reutilizada")
+        await page.locator('input[type="password"]').wait_for(state="visible", timeout=15000)
+    except Exception as error:
+        if _es_panel_defontana(page.url):
+            log_fn("Sesión Defontana reutilizada")
             await guardar_sesion_contexto(page.context, log_fn)
             return
-        await page.wait_for_selector("input", state="visible", timeout=20000)
-    log_fn("Ingresando credenciales Tivendo...")
-    inputs = page.locator("input")
-    await inputs.nth(0).click()
-    await inputs.nth(0).press_sequentially(email, delay=20)
-    await pausa_corta()
-    await inputs.nth(1).click()
-    await inputs.nth(1).press_sequentially(password, delay=20)
-    await pausa_corta()
-    await page.get_by_role("button", name="Iniciar Sesión").click()
-    log_fn("Esperando redirección...")
+        raise ErrorAccesoDefontana("El portal Defontana no mostró el formulario de acceso") from error
+    log_fn("Ingresando credenciales en el portal Defontana...")
+    await page.locator('input:not([type="password"]):visible').first.fill(email)
+    await page.locator('input[type="password"]').fill(password)
+    await page.get_by_role("button", name="Confirmar", exact=True).click()
+    log_fn("Esperando el panel Defontana...")
     try:
-        await page.wait_for_url(lambda url: "login" not in url.lower(), timeout=20000)
+        await page.wait_for_url(_es_panel_defontana, timeout=20000)
     except Exception:
         pass
     await esperar_carga_ligera(page)
-    if "login" in page.url.lower():
+    if not _es_panel_defontana(page.url):
         if await _contrasena_rechazada(page):
             raise ErrorCredenciales("Tivendo")
-        raise Exception("Login Tivendo fallido")
+        raise ErrorAccesoDefontana("El portal Defontana no confirmó el acceso; no se reintentará automáticamente")
     await guardar_sesion_contexto(page.context, log_fn)
-    log_fn("✓ Login Tivendo exitoso")
+    log_fn("✓ Acceso al portal Defontana comprobado")
 
 
 async def login_mercadohouse(page, email: str, password: str, log_fn) -> None:

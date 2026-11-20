@@ -19,7 +19,7 @@ from getpass import getpass
 from pathlib import Path
 from datetime import datetime, date
 from app_paths import APP_DIR, USER_DATA_DIR, configure_console_encoding, configure_playwright_browsers, runtime_path
-from utils import MODO_LIMPIO_ENV, ErrorCredenciales, borrar_sesion_guardada, crear_pagina_trabajo, login_tivendo, login_mercadohouse
+from utils import MODO_LIMPIO_ENV, ErrorAccesoDefontana, ErrorCredenciales, borrar_sesion_guardada, crear_pagina_trabajo, login_tivendo, login_mercadohouse
 from trabajo_lock import bot_exclusivo, trabajo_exclusivo
 import telegram_bot
 
@@ -532,6 +532,11 @@ async def _ejecutar_con_reintentos_impl(nombre, fn_check, fn_run, permitir_corre
             if await corregir_contrasena(error.servicio):
                 borrar_sesion_guardada()
                 return await _ejecutar_con_reintentos_impl(nombre, fn_check, fn_run, permitir_correccion=False)
+            return False
+        except ErrorAccesoDefontana as error:
+            _ultimo_error_fuente = str(error)
+            os.environ.pop(MODO_LIMPIO_ENV, None)
+            print(f"  ❌  {nombre}: {error}")
             return False
         except SystemExit as e:
             _ultimo_error_fuente = f"Error del proceso (código {e.code})"
