@@ -21,6 +21,47 @@ def libre():
 
 
 class BotTests(unittest.IsolatedAsyncioTestCase):
+    async def test_stock_requires_initiators_confirmation_and_has_no_excel_option(self):
+        config = {"token": "test", "chat_id": 10, "user_id": 20,
+                  "usuarios": [{"chat_id": 10, "user_id": 20},
+                               {"chat_id": 11, "user_id": 21}]}
+        esperando = asyncio.Event()
+        decisiones = []
+
+        async def ejecutar_stock(confirmar):
+            item = type("Item", (), {"codigo": "A1", "descripcion": "Producto",
+                                     "stock_informe": "-2", "cantidad_propuesta": "2"})()
+            esperando.set()
+            decisiones.append(await confirmar([item], []))
+            return decisiones[-1]
+
+        def boton(chat_id, user_id, dato):
+            return {"callback_query": {"id": f"{chat_id}-{dato}",
+                    "from": {"id": user_id}, "message": {"chat": {"id": chat_id}},
+                    "data": dato}}
+
+        bot = telegram_bot.Bot(config, AsyncMock(), ejecutar_stock=ejecutar_stock)
+        with patch.object(telegram_bot, "api", new_callable=AsyncMock) as api, \
+             patch.object(telegram_bot, "enviar", new_callable=AsyncMock):
+            await bot.procesar(boton(10, 20, "stock_negativo"))
+            await asyncio.wait_for(esperando.wait(), timeout=1)
+            for _ in range(10):
+                if bot.stock_pendiente:
+                    break
+                await asyncio.sleep(0)
+            self.assertIsNotNone(bot.stock_pendiente)
+            identificador = bot.stock_pendiente["id"]
+            mensajes = [call.args[2] for call in api.await_args_list
+                        if call.args[1] == "sendMessage"]
+            propuesta = next(p for p in mensajes if "Confirmar ajuste" in str(p.get("reply_markup")))
+            self.assertIn("A1 | Producto", propuesta["text"])
+            self.assertIn("No se generará Excel", propuesta["text"])
+            await bot.procesar(boton(11, 21, f"stock_aplicar:{identificador}"))
+            self.assertFalse(bot.stock_pendiente["future"].done())
+            await bot.procesar(boton(10, 20, f"stock_aplicar:{identificador}"))
+            await bot.trabajo
+        self.assertEqual(decisiones, [True])
+
     async def test_menu_command_stays_available_beside_chat_input(self):
         with patch.object(telegram_bot, "api", new_callable=AsyncMock) as api:
             await telegram_bot.configurar_acceso_menu("test")
@@ -336,6 +377,20 @@ class BotTests(unittest.IsolatedAsyncioTestCase):
         with patch.object(menu, "ejecutar_operacion", new_callable=AsyncMock) as ejecutar:
             await menu.ejecutar_desde_bot("todo", "Sync Todo")
         self.assertIs(ejecutar.await_args.args[1], menu.run_sync_todo)
+
+    async def test_telegram_stock_runs_without_excel_dialog_or_password_prompt(self):
+        async def confirmar(_items, _omitidos):
+            return True
+        with patch.object(menu, "ejecutar_operacion", new_callable=AsyncMock) as ejecutar:
+            await menu.ejecutar_stock_desde_bot(confirmar)
+            funcion = ejecutar.await_args.args[1]
+            self.assertEqual(ejecutar.await_args.kwargs["origen"], "Telegram")
+        with patch.object(menu.stock_negativo, "ejecutar_ajuste_completo",
+                          new_callable=AsyncMock, return_value=True) as ajuste, \
+             patch.object(menu, "titulo"):
+            self.assertTrue(await funcion())
+        self.assertIs(ajuste.await_args.kwargs["confirmar_fn"], confirmar)
+        self.assertFalse(ajuste.await_args.kwargs["informe_interactivo"])
 
     async def test_status_button_reports_current_stage_only_when_requested(self):
         with tempfile.TemporaryDirectory() as tmp, \

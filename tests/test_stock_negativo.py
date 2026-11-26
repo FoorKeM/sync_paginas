@@ -1,12 +1,69 @@
 import json
 import tempfile
+import json
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from openpyxl import Workbook, load_workbook
 
 import stock_negativo
+
+
+class AjusteOpcionalTests(unittest.IsolatedAsyncioTestCase):
+    async def _ejecutar_simulado(self, decision, interactivo):
+        item = stock_negativo.AdjustmentItem("A1", "Producto", "-2", "123", "2")
+        with tempfile.TemporaryDirectory() as tmp:
+            resultado = Path(tmp) / "resultado.json"
+            resultado.write_text(json.dumps({"estado": "guardado"}), encoding="utf-8")
+            with patch.object(stock_negativo, "preparar", new_callable=AsyncMock,
+                              return_value=(None, None, None, [item], [])), \
+                 patch.object(stock_negativo, "aplicar", new_callable=AsyncMock,
+                              return_value=resultado) as aplicar, \
+                 patch.object(stock_negativo, "guardar_informe_interactivo",
+                              return_value=Path(tmp) / "informe.xlsx") as informe, \
+                 patch.object(stock_negativo, "limpiar_descargas", return_value=[]), \
+                 patch.object(stock_negativo, "rotar_log"):
+                async def confirmar(_items, _omitidos):
+                    return decision
+                ok = await stock_negativo.ejecutar_ajuste_completo(
+                    confirmar_fn=confirmar, informe_interactivo=interactivo)
+                return ok, aplicar.await_count, informe.call_count
+
+    async def test_telegram_no_genera_excel_y_requiere_confirmacion(self):
+        self.assertEqual(await self._ejecutar_simulado(True, False), (True, 1, 0))
+        self.assertIsNone(stock_negativo.ULTIMO_INFORME)
+        self.assertEqual(await self._ejecutar_simulado((True, True), False), (True, 1, 0))
+        self.assertEqual(await self._ejecutar_simulado(False, False), (False, 0, 0))
+
+    async def test_pc_puede_omitir_excel_o_guardarlo(self):
+        self.assertEqual(await self._ejecutar_simulado((True, False), True), (True, 1, 0))
+        self.assertEqual(await self._ejecutar_simulado((True, True), True), (True, 1, 1))
+
+
+class AperturaInformeTests(unittest.IsolatedAsyncioTestCase):
+    async def test_espera_titulo_visible_sin_confundirlo_con_menu_oculto(self):
+        page = MagicMock()
+        informes = MagicMock()
+        informes.first.click = AsyncMock()
+        inventario = MagicMock()
+        inventario.wait_for = AsyncMock()
+        inventario.click = AsyncMock()
+
+        def buscar_texto(texto, **_kwargs):
+            if texto == "Bodegas":
+                raise AssertionError("El texto Bodegas también existe en el menú oculto")
+            return informes if texto == "Informes" else inventario
+
+        page.get_by_text.side_effect = buscar_texto
+        page.get_by_role.return_value.wait_for = AsyncMock()
+        page.locator.return_value.count = AsyncMock(return_value=0)
+        await stock_negativo._open_inventory_report(page)
+
+        page.get_by_role.assert_called_once_with("heading", name="Bodegas", exact=True)
+        page.get_by_role.return_value.wait_for.assert_awaited_once_with(
+            state="visible", timeout=30000,
+        )
 
 
 def crear_libro(path: Path, rows: list[list]) -> None:

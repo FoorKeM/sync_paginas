@@ -253,6 +253,7 @@ def teclado():
          {"text": "Packs + Precios", "callback_data": "packs_precios"}],
         [{"text": "8. Completo manual (Excel)", "callback_data": "excel_completo"}],
         [{"text": "9. Programar precios (Excel)", "callback_data": "excel_programar"}],
+        [{"text": "10. Ajustar stock negativo", "callback_data": "stock_negativo"}],
         [{"text": "Ver estado", "callback_data": "estado"}],
         [{"text": "Configuración", "callback_data": "configuracion"}],
     ]}
@@ -482,7 +483,7 @@ async def configurar_solo_avisos(leer_token, leer_id):
 class Bot:
     def __init__(self, config, ejecutar, debe_detener=None,
                  actualizar_credenciales=None, cambiar_sucursal=None, ejecutar_excel=None,
-                 programar_excel=None):
+                 programar_excel=None, ejecutar_stock=None):
         self.config = config
         self.ejecutar = ejecutar
         self.offset = config.get("offset")
@@ -493,14 +494,90 @@ class Bot:
         self.cambiar_sucursal = cambiar_sucursal
         self.ejecutar_excel = ejecutar_excel
         self.programar_excel = programar_excel
+        self.ejecutar_stock = ejecutar_stock
         self.edicion = None
         self.excel_pendiente = None
+        self.stock_pendiente = None
 
     def parar(self):
         self.detener.set()
+        if self.stock_pendiente and not self.stock_pendiente["future"].done():
+            self.stock_pendiente["future"].set_result(False)
 
     async def _respuesta(self, texto, botones=False):
         await enviar(texto, self.config, botones)
+
+    async def _respuesta_a(self, chat_id, texto, botones=None):
+        payload = {"chat_id": chat_id, "text": texto[:4096]}
+        if botones:
+            payload["reply_markup"] = botones
+        await api(self.config["token"], "sendMessage", payload)
+
+    async def _confirmar_stock(self, items, omitidos, chat_id, user_id):
+        identificador = secrets.token_hex(4)
+        futuro = asyncio.get_running_loop().create_future()
+        pendiente = {"id": identificador, "chat_id": chat_id,
+                     "user_id": user_id, "future": futuro}
+        self.stock_pendiente = pendiente
+        try:
+            import config as sucursales
+            lineas = [f"Sucursal: {sucursales.sucursal_activa()['nombre']}",
+                      f"Se ajustarían {len(items)} artículo(s) con stock negativo:"]
+            lineas.extend(
+                f"{indice:02d}. {item.codigo} | {item.descripcion} | "
+                f"stock {item.stock_informe} | ajuste +{item.cantidad_propuesta}"
+                for indice, item in enumerate(items, 1)
+            )
+            if omitidos:
+                lineas.append(f"Omitidos sin ajuste: {len(omitidos)}")
+                lineas.extend(
+                    f"{dato['codigo']} | {dato['descripcion']} | {dato['motivo']}"
+                    for dato in omitidos
+                )
+            lineas.append("Confirma solo si los artículos y cantidades son correctos. No se generará Excel.")
+            partes, actual = [], ""
+            for linea in lineas:
+                if len(actual) + len(linea) + 1 > 3500 and actual:
+                    partes.append(actual)
+                    actual = ""
+                actual += linea[:3400] + "\n"
+            if actual:
+                partes.append(actual)
+            for parte in partes[:-1]:
+                await self._respuesta_a(chat_id, parte)
+            await self._respuesta_a(chat_id, partes[-1], botones={"inline_keyboard": [
+                [{"text": "Confirmar ajuste", "callback_data": f"stock_aplicar:{identificador}"},
+                 {"text": "Cancelar", "callback_data": f"stock_cancelar:{identificador}"}]
+            ]})
+            return bool(await asyncio.wait_for(futuro, timeout=600))
+        except asyncio.TimeoutError:
+            await self._respuesta_a(chat_id, "Tiempo de confirmación agotado. No se modificó el stock.")
+            return False
+        finally:
+            if self.stock_pendiente is pendiente:
+                self.stock_pendiente = None
+
+    async def _iniciar_stock(self, chat_id, user_id):
+        if not self.ejecutar_stock:
+            await self._respuesta_a(chat_id, "El ajuste de stock no está disponible en este PC.")
+            return
+        if self.trabajo and not self.trabajo.done():
+            await self._respuesta_a(chat_id, "Ya hay una tarea en curso. Usa Estado para consultarla.")
+            return
+        await self._respuesta_a(chat_id, "Revisando stock negativo. Te enviaré la propuesta para confirmarla antes de ajustar.")
+        async def ejecutar():
+            async def confirmar(items, omitidos):
+                return await self._confirmar_stock(items, omitidos, chat_id, user_id)
+            return await self.ejecutar_stock(confirmar)
+        self.trabajo = asyncio.create_task(ejecutar())
+        def terminado(tarea):
+            try:
+                tarea.result()
+            except asyncio.CancelledError:
+                asyncio.create_task(self._respuesta_a(chat_id, "El ajuste se interrumpió. Revisa el estado en el PC."))
+            except Exception:
+                asyncio.create_task(self._respuesta_a(chat_id, "El ajuste falló. Revisa el diagnóstico en el PC."))
+        self.trabajo.add_done_callback(terminado)
 
     async def _iniciar(self, clave):
         if self.trabajo and not self.trabajo.done():
@@ -708,6 +785,26 @@ class Bot:
         clave = texto.lower().split("@")[0]
         if clave.startswith("/"):
             clave = clave[1:]
+        if clave.startswith(("stock_aplicar:", "stock_cancelar:")):
+            pendiente = self.stock_pendiente
+            identificador = clave.partition(":")[2]
+            if (not pendiente or pendiente["id"] != identificador
+                    or pendiente["chat_id"] != chat.get("id")
+                    or pendiente["user_id"] != sender.get("id")
+                    or pendiente["future"].done()):
+                await self._respuesta_a(chat["id"], "Esta confirmación no está activa para tu cuenta.")
+            else:
+                aceptar = clave.startswith("stock_aplicar:")
+                pendiente["future"].set_result(aceptar)
+                await self._respuesta_a(chat["id"],
+                                        "Ajuste confirmado. Te avisaré al terminar." if aceptar
+                                        else "Ajuste cancelado. No se modificó el stock.")
+            return
+        if (clave in ("cancelar", "menu") and self.stock_pendiente
+                and self.stock_pendiente["chat_id"] == chat.get("id")
+                and self.stock_pendiente["user_id"] == sender.get("id")
+                and not self.stock_pendiente["future"].done()):
+            self.stock_pendiente["future"].set_result(False)
         if message.get("document"):
             if self.edicion:
                 await self._respuesta("Termina o cancela la edición de credenciales antes de enviar un Excel.")
@@ -749,6 +846,10 @@ class Bot:
                         "programar" if clave == "excel_programar" else "completo")
                 self.excel_pendiente = {"modo": modo, "etapa": "documento"}
                 await self._respuesta("Envía ahora el Excel de precios como documento .xlsx (máximo 20 MB). Lo revisaré antes de continuar.")
+        elif clave == "stock_negativo":
+            self.edicion = None
+            self._cancelar_excel()
+            await self._iniciar_stock(chat["id"], sender["id"])
         elif clave.startswith("excel_confirmar:"):
             await self._confirmar_excel(clave.partition(":")[2])
         elif clave.startswith("excel_cancelar:"):

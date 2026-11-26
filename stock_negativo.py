@@ -66,6 +66,7 @@ log = crear_logger(LOG_FILE)
 ULTIMA_PROPUESTA: list["AdjustmentItem"] | None = None
 ULTIMO_RESULTADO: dict | None = None
 ULTIMO_INFORME: str | None = None
+ULTIMO_ERROR_INFORME: str | None = None
 
 
 @dataclass(frozen=True)
@@ -280,7 +281,11 @@ async def _open_inventory_report(page) -> None:
     inventory = page.get_by_text("Informes de Inventario", exact=True)
     await inventory.wait_for(state="visible", timeout=15000)
     await inventory.click()
-    await page.get_by_text("Bodegas", exact=True).wait_for(state="visible", timeout=30000)
+    # El menú lateral también contiene "Bodegas", a veces oculto. Esperar el
+    # título del informe evita la ambigüedad de get_by_text en modo estricto.
+    await page.get_by_role("heading", name="Bodegas", exact=True).wait_for(
+        state="visible", timeout=30000,
+    )
     menu_toggle = page.locator("#menu_lateral button.boton_toggle_menu")
     if await menu_toggle.count():
         await menu_toggle.evaluate("element => element.click()")
@@ -830,16 +835,19 @@ def guardar_informe_interactivo(result_path: Path, items: list[AdjustmentItem]) 
 #  Orquestador de alto nivel para menu.py
 # ============================================================
 
-async def ejecutar_ajuste_completo(simular: bool = False, confirmar_fn=None) -> bool:
+async def ejecutar_ajuste_completo(simular: bool = False, confirmar_fn=None,
+                                   informe_interactivo: bool = True) -> bool:
     """Prepara, muestra la propuesta, aplica (o simula) y genera el informe.
 
-    confirmar_fn(items, omitidos) -> bool, si se entrega, se llama despues de preparar()
-    y antes de aplicar() de verdad; si devuelve False se aborta sin tocar Tivendo.
+    confirmar_fn(items, omitidos) confirma antes de aplicar. Puede devolver un bool
+    o (aplicar, guardar_excel) y ser síncrona o asíncrona. La segunda forma permite
+    confirmar desde Telegram sin abrir diálogos de Windows.
     """
-    global ULTIMA_PROPUESTA, ULTIMO_RESULTADO, ULTIMO_INFORME
+    global ULTIMA_PROPUESTA, ULTIMO_RESULTADO, ULTIMO_INFORME, ULTIMO_ERROR_INFORME
     ULTIMA_PROPUESTA = None
     ULTIMO_RESULTADO = None
     ULTIMO_INFORME = None
+    ULTIMO_ERROR_INFORME = None
     rotar_log(LOG_FILE)
 
     log("=" * 50)
@@ -866,9 +874,20 @@ async def ejecutar_ajuste_completo(simular: bool = False, confirmar_fn=None) -> 
     for item in items:
         log(f"  {item.codigo} | {item.descripcion} | stock: {item.stock_informe} | ajuste: +{item.cantidad_propuesta}")
 
-    if confirmar_fn is not None and not confirmar_fn(items, omitidos):
-        log("Ajuste cancelado por el usuario antes de aplicarlo. No se modifico Tivendo.")
-        return False
+    guardar_excel = informe_interactivo
+    if confirmar_fn is not None:
+        import inspect
+        decision = confirmar_fn(items, omitidos)
+        if inspect.isawaitable(decision):
+            decision = await decision
+        if isinstance(decision, tuple):
+            aplicar_ajuste, guardar_excel = decision
+        else:
+            aplicar_ajuste = bool(decision)
+        if not aplicar_ajuste:
+            log("Ajuste cancelado por el usuario antes de aplicarlo. No se modifico Tivendo.")
+            return False
+    guardar_excel = bool(guardar_excel and informe_interactivo)
 
     result_path = await aplicar(items, simular=simular)
     ULTIMO_RESULTADO = json.loads(result_path.read_text(encoding="utf-8"))
@@ -878,9 +897,16 @@ async def ejecutar_ajuste_completo(simular: bool = False, confirmar_fn=None) -> 
         return True
 
     log("✓ Ajuste guardado en Tivendo.")
-    informe_path = guardar_informe_interactivo(result_path, items)
-    ULTIMO_INFORME = str(informe_path)
-    log(f"Informe guardado: {informe_path}")
+    if guardar_excel:
+        try:
+            informe_path = guardar_informe_interactivo(result_path, items)
+            ULTIMO_INFORME = str(informe_path)
+            log(f"Informe guardado: {informe_path}")
+        except Exception as exc:
+            ULTIMO_ERROR_INFORME = f"{type(exc).__name__}: {exc}"
+            log(f"⚠ El stock se ajusto, pero no se pudo guardar el Excel: {ULTIMO_ERROR_INFORME}")
+    else:
+        log("El usuario eligio no guardar el informe Excel.")
 
     eliminados = limpiar_descargas(result_path)
     log(f"Descargas eliminadas: {len(eliminados)}")
