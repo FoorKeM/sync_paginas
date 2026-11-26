@@ -32,7 +32,9 @@ class BotTests(unittest.IsolatedAsyncioTestCase):
             item = type("Item", (), {"codigo": "A1", "descripcion": "Producto",
                                      "stock_informe": "-2", "cantidad_propuesta": "2"})()
             esperando.set()
-            decisiones.append(await confirmar([item], []))
+            decisiones.append(await confirmar([item] * 1000, [
+                {"codigo": "A3", "descripcion": "Omitido", "motivo": "Sin código"}
+            ]))
             return decisiones[-1]
 
         def boton(chat_id, user_id, dato):
@@ -53,8 +55,13 @@ class BotTests(unittest.IsolatedAsyncioTestCase):
             identificador = bot.stock_pendiente["id"]
             mensajes = [call.args[2] for call in api.await_args_list
                         if call.args[1] == "sendMessage"]
-            propuesta = next(p for p in mensajes if "Confirmar ajuste" in str(p.get("reply_markup")))
-            self.assertIn("A1 | Producto", propuesta["text"])
+            propuestas = [p for p in mensajes if "Confirmar ajuste" in str(p.get("reply_markup"))]
+            self.assertEqual(len(propuestas), 1)
+            propuesta = propuestas[0]
+            self.assertIn("Se ajustarán 1000 artículos", propuesta["text"])
+            self.assertIn("1 artículo fue omitido", propuesta["text"])
+            self.assertNotIn("A1 | Producto", propuesta["text"])
+            self.assertNotIn("A3 | Omitido", propuesta["text"])
             self.assertIn("No se generará Excel", propuesta["text"])
             await bot.procesar(boton(11, 21, f"stock_aplicar:{identificador}"))
             self.assertFalse(bot.stock_pendiente["future"].done())

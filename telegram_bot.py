@@ -521,31 +521,14 @@ class Bot:
         self.stock_pendiente = pendiente
         try:
             import config as sucursales
+            articulo = "artículo" if len(items) == 1 else "artículos"
             lineas = [f"Sucursal: {sucursales.sucursal_activa()['nombre']}",
-                      f"Se ajustarían {len(items)} artículo(s) con stock negativo:"]
-            lineas.extend(
-                f"{indice:02d}. {item.codigo} | {item.descripcion} | "
-                f"stock {item.stock_informe} | ajuste +{item.cantidad_propuesta}"
-                for indice, item in enumerate(items, 1)
-            )
+                      f"Se ajustarán {len(items)} {articulo} con stock negativo."]
             if omitidos:
-                lineas.append(f"Omitidos sin ajuste: {len(omitidos)}")
-                lineas.extend(
-                    f"{dato['codigo']} | {dato['descripcion']} | {dato['motivo']}"
-                    for dato in omitidos
-                )
-            lineas.append("Confirma solo si los artículos y cantidades son correctos. No se generará Excel.")
-            partes, actual = [], ""
-            for linea in lineas:
-                if len(actual) + len(linea) + 1 > 3500 and actual:
-                    partes.append(actual)
-                    actual = ""
-                actual += linea[:3400] + "\n"
-            if actual:
-                partes.append(actual)
-            for parte in partes[:-1]:
-                await self._respuesta_a(chat_id, parte)
-            await self._respuesta_a(chat_id, partes[-1], botones={"inline_keyboard": [
+                omitido = "artículo fue omitido" if len(omitidos) == 1 else "artículos fueron omitidos"
+                lineas.append(f"{len(omitidos)} {omitido} y no se ajustarán. Revisa el registro del PC.")
+            lineas.append("¿Confirmas el ajuste? No se generará Excel.")
+            await self._respuesta_a(chat_id, "\n".join(lineas), botones={"inline_keyboard": [
                 [{"text": "Confirmar ajuste", "callback_data": f"stock_aplicar:{identificador}"},
                  {"text": "Cancelar", "callback_data": f"stock_cancelar:{identificador}"}]
             ]})
@@ -564,7 +547,7 @@ class Bot:
         if self.trabajo and not self.trabajo.done():
             await self._respuesta_a(chat_id, "Ya hay una tarea en curso. Usa Estado para consultarla.")
             return
-        await self._respuesta_a(chat_id, "Revisando stock negativo. Te enviaré la propuesta para confirmarla antes de ajustar.")
+        await self._respuesta_a(chat_id, "Revisando stock negativo. Te diré cuántos artículos se ajustarían antes de confirmar.")
         async def ejecutar():
             async def confirmar(items, omitidos):
                 return await self._confirmar_stock(items, omitidos, chat_id, user_id)
