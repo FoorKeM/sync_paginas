@@ -17,8 +17,7 @@ Flujo completo:
      bodega de la sucursal → por cada artículo validado: buscar, revalidar
      stock actual contra la API, cargar la cantidad exacta para dejarlo en 0,
      Guardar con evidencia (JSON + captura).
-  3. INFORME: Excel final solo con lo realmente ajustado.
-  4. LIMPIEZA: borra los archivos temporales descargados.
+  3. LIMPIEZA: borra los archivos temporales descargados.
 
 Seguridad del flujo (heredada del proyecto original):
   - Solo procesa códigos que empiezan con "A".
@@ -37,6 +36,7 @@ from dataclasses import asdict, dataclass
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from app_paths import AJUSTE_DIR, DESCARGA_DIR, runtime_path, configure_playwright_browsers
 configure_playwright_browsers()
@@ -65,8 +65,9 @@ log = crear_logger(LOG_FILE)
 
 ULTIMA_PROPUESTA: list["AdjustmentItem"] | None = None
 ULTIMO_RESULTADO: dict | None = None
-ULTIMO_INFORME: str | None = None
-ULTIMO_ERROR_INFORME: str | None = None
+ULTIMO_ERROR_LIMPIEZA: str | None = None
+ULTIMO_GUARDADO_INCIERTO = False
+ULTIMO_AJUSTE_CANCELADO = False
 
 
 @dataclass(frozen=True)
@@ -599,6 +600,7 @@ def _guardar_resultado(payload: dict) -> Path:
 
 async def aplicar(items: list[AdjustmentItem], simular: bool = False) -> Path:
     """Aplica el ajuste en Tivendo para los artículos ya validados por preparar()."""
+    global ULTIMO_GUARDADO_INCIERTO
     suc = _cfg.sucursal_activa()
     bodega = suc["tivendo_bodega"]
     zona_stock = suc["tivendo_zona_stock"]
@@ -646,15 +648,21 @@ async def aplicar(items: list[AdjustmentItem], simular: bool = False) -> Path:
             respuestas = []
 
             def registrar_respuesta(response):
-                if response.request.method in {"POST", "PUT"} and "api-pos-prod.defontana.com" in response.url:
-                    respuestas.append({"url": response.url, "status": response.status, "ok": response.ok})
+                if response.request.method in {"POST", "PUT"}:
+                    url = urlsplit(response.url)
+                    respuestas.append({"url": f"{url.scheme}://{url.netloc}{url.path}",
+                                       "status": response.status, "ok": response.ok})
 
             active_page.on("response", registrar_respuesta)
             try:
+                ULTIMO_GUARDADO_INCIERTO = True
                 await boton.click()
+                # Un movimiento grande puede seguir procesándose varios minutos
+                # después del clic. El límite anterior de 120 s marcó como fallo
+                # un movimiento de 243 artículos que Tivendo sí guardó.
                 await active_page.wait_for_function(
                     """() => document.querySelectorAll('input[type="number"]:not([disabled])').length === 0""",
-                    timeout=120000,
+                    timeout=600000,
                 )
             except Exception:
                 payload["estado"] = "guardado_incierto_no_reintentar"
@@ -670,6 +678,7 @@ async def aplicar(items: list[AdjustmentItem], simular: bool = False) -> Path:
             payload["texto_confirmacion"] = (await active_page.locator("body").inner_text())[-2000:]
             await active_page.screenshot(path=str(AJUSTE_DIR / "ultimo_ajuste_guardado.png"), full_page=True)
             result_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+            ULTIMO_GUARDADO_INCIERTO = False
             return result_path
         except Exception as exc:
             await guardar_diagnostico(active_page, exc, log, "stock_negativo_aplicar")
@@ -835,19 +844,15 @@ def guardar_informe_interactivo(result_path: Path, items: list[AdjustmentItem]) 
 #  Orquestador de alto nivel para menu.py
 # ============================================================
 
-async def ejecutar_ajuste_completo(simular: bool = False, confirmar_fn=None,
-                                   informe_interactivo: bool = True) -> bool:
-    """Prepara, muestra la propuesta, aplica (o simula) y genera el informe.
-
-    confirmar_fn(items, omitidos) confirma antes de aplicar. Puede devolver un bool
-    o (aplicar, guardar_excel) y ser síncrona o asíncrona. La segunda forma permite
-    confirmar desde Telegram sin abrir diálogos de Windows.
-    """
-    global ULTIMA_PROPUESTA, ULTIMO_RESULTADO, ULTIMO_INFORME, ULTIMO_ERROR_INFORME
+async def ejecutar_ajuste_completo(simular: bool = False, confirmar_fn=None) -> bool:
+    """Prepara, confirma y aplica el ajuste, sin generar un informe Excel."""
+    global ULTIMA_PROPUESTA, ULTIMO_RESULTADO, ULTIMO_ERROR_LIMPIEZA
+    global ULTIMO_GUARDADO_INCIERTO, ULTIMO_AJUSTE_CANCELADO
     ULTIMA_PROPUESTA = None
     ULTIMO_RESULTADO = None
-    ULTIMO_INFORME = None
-    ULTIMO_ERROR_INFORME = None
+    ULTIMO_ERROR_LIMPIEZA = None
+    ULTIMO_GUARDADO_INCIERTO = False
+    ULTIMO_AJUSTE_CANCELADO = False
     rotar_log(LOG_FILE)
 
     log("=" * 50)
@@ -874,20 +879,15 @@ async def ejecutar_ajuste_completo(simular: bool = False, confirmar_fn=None,
     for item in items:
         log(f"  {item.codigo} | {item.descripcion} | stock: {item.stock_informe} | ajuste: +{item.cantidad_propuesta}")
 
-    guardar_excel = informe_interactivo
     if confirmar_fn is not None:
         import inspect
         decision = confirmar_fn(items, omitidos)
         if inspect.isawaitable(decision):
             decision = await decision
-        if isinstance(decision, tuple):
-            aplicar_ajuste, guardar_excel = decision
-        else:
-            aplicar_ajuste = bool(decision)
-        if not aplicar_ajuste:
+        if not decision:
+            ULTIMO_AJUSTE_CANCELADO = True
             log("Ajuste cancelado por el usuario antes de aplicarlo. No se modifico Tivendo.")
             return False
-    guardar_excel = bool(guardar_excel and informe_interactivo)
 
     result_path = await aplicar(items, simular=simular)
     ULTIMO_RESULTADO = json.loads(result_path.read_text(encoding="utf-8"))
@@ -897,17 +897,12 @@ async def ejecutar_ajuste_completo(simular: bool = False, confirmar_fn=None,
         return True
 
     log("✓ Ajuste guardado en Tivendo.")
-    if guardar_excel:
-        try:
-            informe_path = guardar_informe_interactivo(result_path, items)
-            ULTIMO_INFORME = str(informe_path)
-            log(f"Informe guardado: {informe_path}")
-        except Exception as exc:
-            ULTIMO_ERROR_INFORME = f"{type(exc).__name__}: {exc}"
-            log(f"⚠ El stock se ajusto, pero no se pudo guardar el Excel: {ULTIMO_ERROR_INFORME}")
-    else:
-        log("El usuario eligio no guardar el informe Excel.")
-
-    eliminados = limpiar_descargas(result_path)
-    log(f"Descargas eliminadas: {len(eliminados)}")
+    try:
+        eliminados = limpiar_descargas(result_path)
+        log(f"Descargas eliminadas: {len(eliminados)}")
+    except Exception as exc:
+        # El movimiento ya fue confirmado por Tivendo. Una limpieza fallida
+        # no debe presentarlo como fallo ni inducir a repetir el ajuste.
+        ULTIMO_ERROR_LIMPIEZA = f"{type(exc).__name__}: {exc}"
+        log(f"⚠ Ajuste guardado; no se pudieron limpiar todas las descargas: {ULTIMO_ERROR_LIMPIEZA}")
     return True

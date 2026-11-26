@@ -62,7 +62,7 @@ class BotTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("1 artículo fue omitido", propuesta["text"])
             self.assertNotIn("A1 | Producto", propuesta["text"])
             self.assertNotIn("A3 | Omitido", propuesta["text"])
-            self.assertIn("No se generará Excel", propuesta["text"])
+            self.assertNotIn("Excel", propuesta["text"])
             await bot.procesar(boton(11, 21, f"stock_aplicar:{identificador}"))
             self.assertFalse(bot.stock_pendiente["future"].done())
             await bot.procesar(boton(10, 20, f"stock_aplicar:{identificador}"))
@@ -397,7 +397,34 @@ class BotTests(unittest.IsolatedAsyncioTestCase):
              patch.object(menu, "titulo"):
             self.assertTrue(await funcion())
         self.assertIs(ajuste.await_args.kwargs["confirmar_fn"], confirmar)
-        self.assertFalse(ajuste.await_args.kwargs["informe_interactivo"])
+        self.assertEqual(set(ajuste.await_args.kwargs), {"confirmar_fn"})
+
+    async def test_stock_notification_distinguishes_confirmed_from_uncertain_save(self):
+        with patch.object(menu, "trabajo_exclusivo", libre), \
+             patch.object(menu, "_recargar_credenciales_para_ejecucion"), \
+             patch.object(menu, "_tiene_stock_negativo", True), \
+             patch.object(menu.telegram_bot, "guardar_estado"), \
+             patch.object(menu.telegram_bot, "enviar", new_callable=AsyncMock) as enviar:
+            with patch.object(menu.stock_negativo, "ULTIMO_GUARDADO_INCIERTO", False), \
+                 patch.object(menu.stock_negativo, "ULTIMO_AJUSTE_CANCELADO", False):
+                self.assertTrue(await menu.ejecutar_operacion(
+                    "Ajustar Stock Negativo", AsyncMock(return_value=True), origen="Telegram"))
+                self.assertIn("terminado con éxito", enviar.await_args.args[0])
+            enviar.reset_mock()
+            with patch.object(menu.stock_negativo, "ULTIMO_GUARDADO_INCIERTO", True), \
+                 patch.object(menu.stock_negativo, "ULTIMO_AJUSTE_CANCELADO", False):
+                self.assertFalse(await menu.ejecutar_operacion(
+                    "Ajustar Stock Negativo", AsyncMock(return_value=False), origen="Telegram"))
+                self.assertIn("no confirmó el guardado", enviar.await_args.args[0])
+                self.assertNotIn("terminado con éxito", enviar.await_args.args[0])
+
+    async def test_pc_stock_confirmation_does_not_ask_for_excel(self):
+        item = type("Item", (), {"codigo": "A1", "descripcion": "Producto",
+                                 "stock_informe": "-2", "cantidad_propuesta": "2"})()
+        with patch("builtins.input", return_value="s") as preguntar, redirect_stdout(StringIO()):
+            self.assertTrue(menu._confirmar_ajuste_stock_negativo([item]))
+        preguntar.assert_called_once()
+        self.assertNotIn("Excel", preguntar.call_args.args[0])
 
     async def test_status_button_reports_current_stage_only_when_requested(self):
         with tempfile.TemporaryDirectory() as tmp, \

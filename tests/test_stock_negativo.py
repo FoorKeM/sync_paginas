@@ -10,8 +10,8 @@ from openpyxl import Workbook, load_workbook
 import stock_negativo
 
 
-class AjusteOpcionalTests(unittest.IsolatedAsyncioTestCase):
-    async def _ejecutar_simulado(self, decision, interactivo):
+class AjusteSinExcelTests(unittest.IsolatedAsyncioTestCase):
+    async def _ejecutar_simulado(self, decision, error_limpieza=None):
         item = stock_negativo.AdjustmentItem("A1", "Producto", "-2", "123", "2")
         with tempfile.TemporaryDirectory() as tmp:
             resultado = Path(tmp) / "resultado.json"
@@ -22,23 +22,55 @@ class AjusteOpcionalTests(unittest.IsolatedAsyncioTestCase):
                               return_value=resultado) as aplicar, \
                  patch.object(stock_negativo, "guardar_informe_interactivo",
                               return_value=Path(tmp) / "informe.xlsx") as informe, \
-                 patch.object(stock_negativo, "limpiar_descargas", return_value=[]), \
+                 patch.object(stock_negativo, "limpiar_descargas",
+                              side_effect=error_limpieza or None, return_value=[]), \
                  patch.object(stock_negativo, "rotar_log"):
                 async def confirmar(_items, _omitidos):
                     return decision
-                ok = await stock_negativo.ejecutar_ajuste_completo(
-                    confirmar_fn=confirmar, informe_interactivo=interactivo)
+                ok = await stock_negativo.ejecutar_ajuste_completo(confirmar_fn=confirmar)
                 return ok, aplicar.await_count, informe.call_count
 
-    async def test_telegram_no_genera_excel_y_requiere_confirmacion(self):
-        self.assertEqual(await self._ejecutar_simulado(True, False), (True, 1, 0))
-        self.assertIsNone(stock_negativo.ULTIMO_INFORME)
-        self.assertEqual(await self._ejecutar_simulado((True, True), False), (True, 1, 0))
-        self.assertEqual(await self._ejecutar_simulado(False, False), (False, 0, 0))
+    async def test_ajuste_confirmado_no_genera_excel(self):
+        self.assertEqual(await self._ejecutar_simulado(True), (True, 1, 0))
 
-    async def test_pc_puede_omitir_excel_o_guardarlo(self):
-        self.assertEqual(await self._ejecutar_simulado((True, False), True), (True, 1, 0))
-        self.assertEqual(await self._ejecutar_simulado((True, True), True), (True, 1, 1))
+    async def test_cancelar_no_aplica_ajuste(self):
+        self.assertEqual(await self._ejecutar_simulado(False), (False, 0, 0))
+        self.assertTrue(stock_negativo.ULTIMO_AJUSTE_CANCELADO)
+
+    async def test_fallo_de_limpieza_no_convierte_guardado_en_fallo(self):
+        self.assertEqual(await self._ejecutar_simulado(True, RuntimeError("bloqueado")), (True, 1, 0))
+        self.assertIn("bloqueado", stock_negativo.ULTIMO_ERROR_LIMPIEZA)
+
+    async def test_guardado_lento_queda_incierto_sin_reintento(self):
+        item = stock_negativo.AdjustmentItem("A1", "Producto", "-2", "123", "2")
+        page = MagicMock()
+        page.url = "https://tivendoapp.defontana.com/inventario/nuevo"
+        page.get_by_role.return_value.click = AsyncMock()
+        page.wait_for_function = AsyncMock(side_effect=TimeoutError("sin confirmación"))
+        browser = MagicMock()
+        browser.close = AsyncMock()
+        playwright = MagicMock()
+        playwright.__aenter__ = AsyncMock(return_value=MagicMock())
+        playwright.__aexit__ = AsyncMock(return_value=None)
+        with tempfile.TemporaryDirectory() as tmp, \
+             patch.object(stock_negativo, "AJUSTE_DIR", Path(tmp)), \
+             patch.object(stock_negativo, "async_playwright", return_value=playwright), \
+             patch.object(stock_negativo, "crear_pagina_trabajo", new_callable=AsyncMock,
+                          return_value=(browser, MagicMock(), page)), \
+             patch.object(stock_negativo, "login_tivendo", new_callable=AsyncMock), \
+             patch.object(stock_negativo, "_open_movement", new_callable=AsyncMock), \
+             patch.object(stock_negativo, "_configure_movement", new_callable=AsyncMock), \
+             patch.object(stock_negativo, "_wait_catalog", new_callable=AsyncMock), \
+             patch.object(stock_negativo, "_load_item", new_callable=AsyncMock,
+                          return_value={"estado": "cargado", "codigo": "A1"}), \
+             patch.object(stock_negativo, "guardar_diagnostico", new_callable=AsyncMock):
+            with self.assertRaisesRegex(TimeoutError, "sin confirmación"):
+                await stock_negativo.aplicar([item])
+            resultado = next(Path(tmp).glob("resultado_ajuste_*.json"))
+            payload = json.loads(resultado.read_text(encoding="utf-8"))
+        self.assertEqual(payload["estado"], "guardado_incierto_no_reintentar")
+        self.assertTrue(stock_negativo.ULTIMO_GUARDADO_INCIERTO)
+        self.assertEqual(page.wait_for_function.await_args.kwargs["timeout"], 600000)
 
 
 class AperturaInformeTests(unittest.IsolatedAsyncioTestCase):

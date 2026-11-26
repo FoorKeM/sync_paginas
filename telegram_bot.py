@@ -527,7 +527,7 @@ class Bot:
             if omitidos:
                 omitido = "artículo fue omitido" if len(omitidos) == 1 else "artículos fueron omitidos"
                 lineas.append(f"{len(omitidos)} {omitido} y no se ajustarán. Revisa el registro del PC.")
-            lineas.append("¿Confirmas el ajuste? No se generará Excel.")
+            lineas.append("¿Confirmas el ajuste?")
             await self._respuesta_a(chat_id, "\n".join(lineas), botones={"inline_keyboard": [
                 [{"text": "Confirmar ajuste", "callback_data": f"stock_aplicar:{identificador}"},
                  {"text": "Cancelar", "callback_data": f"stock_cancelar:{identificador}"}]

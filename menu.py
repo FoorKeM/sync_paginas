@@ -405,15 +405,26 @@ async def ejecutar_operacion(nombre, fn, origen="Menú"):
             ok = bool(resultado) if resultado is not None else bool(pasos) and all(p["ok"] for p in pasos)
             if _fuente_cancelada:
                 ok = False
-            estado = "Completado" if ok else "Cancelado" if _fuente_cancelada else "Falló"
+            es_ajuste_stock = nombre == "Ajustar Stock Negativo" and _tiene_stock_negativo
+            if es_ajuste_stock and not ok and stock_negativo.ULTIMO_GUARDADO_INCIERTO:
+                estado = "Sin confirmar"
+                lineas = ["⚠️ MHSync — Ajustar Stock Negativo: Tivendo no confirmó el guardado a tiempo. "
+                          "Revisa el movimiento en Tivendo antes de repetir el ajuste."]
+            elif es_ajuste_stock and not ok and stock_negativo.ULTIMO_AJUSTE_CANCELADO:
+                estado = "Cancelado"
+                lineas = ["Ajustar Stock Negativo: cancelado. No se modificó Tivendo."]
+            elif es_ajuste_stock and ok:
+                estado = "Completado"
+                lineas = ["✅ MHSync — Ajustar Stock Negativo: terminado con éxito."]
+            else:
+                estado = "Completado" if ok else "Cancelado" if _fuente_cancelada else "Falló"
+                lineas = [f"{'✅' if ok else '❌'} MHSync — {nombre}: {estado.lower()}."]
             if origen == "Programado" and ok:
                 lineas = ["✅ MHSync — cambio de precios programado completado con éxito."]
-            else:
-                lineas = [f"{'✅' if ok else '❌'} MHSync — {nombre}: {estado.lower()}."]
             for paso in pasos:
                 detalle = f" — {paso['detalle']}" if paso.get("detalle") and not paso["ok"] else ""
                 lineas.append(f"{'✅' if paso['ok'] else '❌'} {paso['nombre']}{detalle}")
-            if not pasos and not ok:
+            if not pasos and not ok and not es_ajuste_stock:
                 lineas.append("No se completó la operación; revisa el registro del PC.")
             incluye_upload = origen in ("Programado", "Telegram archivo") or any(
                 "Upload Precios" in paso["nombre"] for paso in pasos)
@@ -651,7 +662,7 @@ async def run_packs():
     )
 
 
-def _confirmar_ajuste_stock_negativo(items, omitidos=None) -> tuple[bool, bool]:
+def _confirmar_ajuste_stock_negativo(items, omitidos=None) -> bool:
     omitidos = omitidos or []
     if omitidos:
         print()
@@ -668,14 +679,10 @@ def _confirmar_ajuste_stock_negativo(items, omitidos=None) -> tuple[bool, bool]:
         )
     print("  " + "-" * 54)
     resp = input("  ¿Aplicar este ajuste en Tivendo? (s/n): ").strip().lower()
-    if resp != "s":
-        return False, False
-    guardar = input("  ¿Guardar el informe Excel al terminar? (s/n): ").strip().lower() == "s"
-    return True, guardar
+    return resp == "s"
 
 
-async def run_stock_negativo(permitir_correccion=True, confirmar_fn=None,
-                            informe_interactivo=True):
+async def run_stock_negativo(permitir_correccion=True, confirmar_fn=None):
     titulo("PASO 10 — Ajustar Stock Negativo", depende_sucursal=True)
     if not _tiene_stock_negativo:
         print("  ❌  Módulo no encontrado para: Ajustar Stock Negativo")
@@ -685,23 +692,22 @@ async def run_stock_negativo(permitir_correccion=True, confirmar_fn=None,
     # podría duplicar el ajuste. Cualquier falla se revisa a mano.
     try:
         ok = await stock_negativo.ejecutar_ajuste_completo(
-            confirmar_fn=confirmar_fn or _confirmar_ajuste_stock_negativo,
-            informe_interactivo=informe_interactivo)
+            confirmar_fn=confirmar_fn or _confirmar_ajuste_stock_negativo)
     except ErrorCredenciales as error:
         if permitir_correccion and await corregir_contrasena(error.servicio):
             borrar_sesion_guardada()
             return await run_stock_negativo(permitir_correccion=False,
-                                           confirmar_fn=confirmar_fn,
-                                           informe_interactivo=informe_interactivo)
+                                           confirmar_fn=confirmar_fn)
         return False
     except Exception as e:
-        print(f"  ❌  Ajustar Stock Negativo falló: {e}")
-        print("  No se reintenta automáticamente: revisa el diagnóstico antes de volver a intentar.")
+        if stock_negativo.ULTIMO_GUARDADO_INCIERTO:
+            print("  ⚠️  Tivendo no confirmó el guardado a tiempo. Comprueba el movimiento antes de repetir.")
+        else:
+            print(f"  ❌  Ajustar Stock Negativo falló: {e}")
+            print("  No se reintenta automáticamente: revisa el diagnóstico antes de volver a intentar.")
         return False
     if ok:
         print("  ✅  Ajustar Stock Negativo completado.")
-        if stock_negativo.ULTIMO_ERROR_INFORME:
-            print("  ⚠️  El stock se ajustó, pero no se pudo guardar el informe Excel.")
     return ok
 
 
@@ -1860,8 +1866,7 @@ async def ejecutar_stock_desde_bot(confirmar_fn):
     return await ejecutar_operacion(
         "Ajustar Stock Negativo",
         lambda: run_stock_negativo(permitir_correccion=False,
-                                  confirmar_fn=confirmar_fn,
-                                  informe_interactivo=False),
+                                  confirmar_fn=confirmar_fn),
         origen="Telegram",
     )
 
