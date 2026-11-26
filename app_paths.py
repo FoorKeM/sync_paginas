@@ -23,14 +23,17 @@ def _local_app_data_dir() -> Path:
 
 
 APP_DIR = app_dir()
-DATA_DIR = _local_app_data_dir() if IS_FROZEN else APP_DIR
+USER_DATA_DIR = _local_app_data_dir()
+DATA_DIR = USER_DATA_DIR if IS_FROZEN else APP_DIR
 RUNTIME_DIR = (Path(tempfile.gettempdir()) / "MercadohouseSync") if IS_FROZEN else APP_DIR
 DIAG_DIR = DATA_DIR / "diagnosticos"
 DESCARGA_DIR = DATA_DIR / "downloads"
+AJUSTE_DIR = DATA_DIR / "ajustes_stock"
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
 DIAG_DIR.mkdir(parents=True, exist_ok=True)
 DESCARGA_DIR.mkdir(parents=True, exist_ok=True)
+AJUSTE_DIR.mkdir(parents=True, exist_ok=True)
 
 
 def configure_playwright_browsers() -> None:

@@ -5,10 +5,15 @@ utils.py — Helpers compartidos para todos los scripts de sincronización.
 import asyncio
 import json
 import os
+import re
 import sys
 import time
+import unicodedata
+import uuid
+import zipfile
 from pathlib import Path
 from datetime import datetime
+from urllib.parse import urljoin, urlsplit
 from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 from app_paths import DATA_DIR, DIAG_DIR
 
@@ -94,14 +99,23 @@ async def guardar_sesion_contexto(context, log_fn=None) -> None:
 class MedidorEtapas:
     """Registra duracion de etapas sin usar esos tiempos para decidir esperas."""
 
-    def __init__(self, log_fn):
+    def __init__(self, log_fn, fuente="Sync"):
         self.log_fn = log_fn
+        self.fuente = fuente
         self.resultados = []
         self.etapa_actual = ""
         self.ultima_etapa = ""
 
     def etapa(self, nombre: str):
         return _EtapaMedida(self, nombre)
+
+    def informar_etapa(self, nombre: str):
+        self.ultima_etapa = nombre
+        try:
+            import telegram_bot
+            telegram_bot.actualizar_etapa(self.fuente, nombre)
+        except Exception:
+            pass  # El avance no debe detener una sincronización.
 
     def _agregar(self, nombre: str, segundos: float) -> None:
         self.resultados.append((nombre, segundos))
@@ -116,6 +130,13 @@ class MedidorEtapas:
         self.log_fn(f"  Total medido: {total:.1f}s")
 
 
+class ErrorEtapaFuente(RuntimeError):
+    def __init__(self, fuente, etapa, error):
+        self.fuente = fuente
+        self.etapa = etapa
+        super().__init__(f"{fuente}: falló en «{etapa}»: {error}")
+
+
 class _EtapaMedida:
     def __init__(self, medidor: MedidorEtapas, nombre: str):
         self.medidor = medidor
@@ -125,7 +146,7 @@ class _EtapaMedida:
     def __enter__(self):
         self.inicio = time.perf_counter()
         self.medidor.etapa_actual = self.nombre
-        self.medidor.ultima_etapa = self.nombre
+        self.medidor.informar_etapa(self.nombre)
         self.medidor.log_fn(f"Inicio etapa: {self.nombre}")
         return self
 
@@ -222,7 +243,7 @@ async def reintentar_accion(nombre: str, accion, log_fn=None, intentos: int = 3,
 
 
 async def launch_chromium(p, headless=True, downloads_path=None, args=None):
-    """Lanza Chromium; en exe prefiere Edge/Chrome del sistema para no cargar navegador suelto."""
+    """Lanza Chromium; en exe prefiere el navegador controlado por Playwright."""
     kwargs = {"headless": headless}
     if downloads_path is not None:
         kwargs["downloads_path"] = downloads_path
@@ -231,6 +252,10 @@ async def launch_chromium(p, headless=True, downloads_path=None, args=None):
 
     if getattr(sys, "frozen", False):
         ultimo_error = None
+        try:
+            return await p.chromium.launch(**kwargs)
+        except Exception as exc:
+            ultimo_error = exc
         for channel in ("msedge", "chrome"):
             try:
                 return await p.chromium.launch(channel=channel, **kwargs)
@@ -256,12 +281,14 @@ async def crear_pagina_trabajo(
 ):
     """Abre browser/context/page con las opciones comunes de los sincronizadores."""
     incognito = incognito or usar_modo_limpio()
-    args = ["--incognito"] if incognito else None
+    args = []
+    if incognito:
+        args.append("--incognito")
     browser = await launch_chromium(
         p,
         headless=not mostrar_navegador,
         downloads_path=carpeta_descarga,
-        args=args,
+        args=args or None,
     )
     context_kwargs = {
         "accept_downloads": accept_downloads,
@@ -297,15 +324,269 @@ async def esperar_carga_ligera(page, timeout: int = 15000) -> None:
 
 async def click_y_capturar_pagina(context, page, locator, timeout: int = 3500):
     """Click que puede abrir pestana nueva; si no, devuelve la misma pagina."""
+    accion = locator if callable(locator) else locator.click
     try:
         async with context.expect_page(timeout=timeout) as page_info:
-            await reintentar_accion("click que abre modulo", locator.click)
+            await reintentar_accion("click que abre modulo", accion)
         nueva = await page_info.value
         await esperar_carga_ligera(nueva)
         return nueva, True
     except PlaywrightTimeoutError:
         await esperar_carga_ligera(page)
         return page, False
+
+
+async def click_tarjeta_defontana(page, nombre: str) -> None:
+    """Busca el módulo por nombre en Recientes o Todos y pulsa su tarjeta."""
+    nombres = [nombre]
+    if nombre == "Punto de Ventas":
+        nombres.append("Punto de Venta")
+
+    async def marcar_tarjeta():
+        return await page.evaluate(
+        """(nombres) => {
+            const normalizar = (valor) => (valor || '').normalize('NFD')
+                .replace(/[\\u0300-\\u036f]/g, '').replace(/\\s+/g, ' ')
+                .trim().toLocaleLowerCase('es');
+            const opciones = nombres.map(normalizar);
+            const visibles = [...document.querySelectorAll('a, button, [role="button"], h1, h2, h3, h4, p, div, span')]
+                .filter((el) => {
+                    if (!opciones.includes(normalizar(el.innerText || el.textContent))) return false;
+                    const estilo = getComputedStyle(el);
+                    const rect = el.getBoundingClientRect();
+                    return estilo.display !== 'none' && estilo.visibility !== 'hidden'
+                        && rect.width > 0 && rect.height > 0;
+                });
+            const texto = visibles[visibles.length - 1];
+            if (!texto) return false;
+            let destino = texto.closest('a, button, [role="button"], mat-card, .mat-card, .mat-mdc-card');
+            if (!destino) {
+                destino = texto;
+                for (let i = 0; i < 4 && destino.parentElement; i++) {
+                    destino = destino.parentElement;
+                    const estilo = getComputedStyle(destino);
+                    if (estilo.cursor === 'pointer' || destino.onclick) break;
+                }
+            }
+            document.querySelectorAll('[data-mh-modulo]').forEach((el) => el.removeAttribute('data-mh-modulo'));
+            destino.setAttribute('data-mh-modulo', nombres[0]);
+            return true;
+        }""",
+        nombres,
+        )
+
+    resultado = await marcar_tarjeta()
+    if not resultado:
+        try:
+            await page.get_by_text("Todos", exact=True).first.click(timeout=5000)
+            await esperar_carga_ligera(page)
+        except Exception:
+            pass
+        resultado = await marcar_tarjeta()
+    if not resultado:
+        raise Exception(
+            f"No se encontró '{nombre}' en Módulos recientes ni en Todos del portal Defontana. "
+            "Revisa si Defontana cambió el nombre del módulo."
+        )
+    await page.locator('[data-mh-modulo]').click(timeout=10000)
+
+
+def _en_modulo(page, host: str) -> bool:
+    url = urlsplit(page.url)
+    return url.hostname == host and "/login" not in (url.path + url.fragment).lower()
+
+
+async def abrir_modulo_defontana(context, portal, nombre, host, controles, log_fn,
+                                url_directa=None, timeout=45000):
+    """Reutiliza la pestaña del módulo y confirma host más controles visibles."""
+    loop = asyncio.get_running_loop()
+    inicio = loop.time()
+    ultimo_clic = inicio - 10
+    paginas_iniciales = set(context.pages)
+    directa_usada = False
+    ultimo_error = None
+    while (loop.time() - inicio) * 1000 < timeout:
+        candidatas = [p for p in reversed(context.pages) if not p.is_closed()]
+        paginas_modulo = [p for p in candidatas if _en_modulo(p, host)]
+        for candidata in paginas_modulo:
+            for control in controles:
+                try:
+                    if await candidata.get_by_text(control, exact=True).first.is_visible():
+                        log_fn(f"✓ {nombre} confirmado en {host}: {control}")
+                        return candidata
+                except Exception as exc:
+                    ultimo_error = exc
+        # Una pestaña nueva todavía puede estar en about:blank mientras carga.
+        pestaña_pendiente = any(p not in paginas_iniciales and p.url in ("about:blank", "")
+                               for p in candidatas)
+        if not paginas_modulo and not pestaña_pendiente and loop.time() - ultimo_clic >= 8:
+            origen = next((p for p in candidatas if "portal.defontana.com" == urlsplit(p.url).hostname), None)
+            if origen:
+                ultimo_clic = loop.time()
+                log_fn(f"Abriendo {nombre} desde el portal...")
+                try:
+                    await click_tarjeta_defontana(origen, nombre)
+                except Exception as exc:
+                    ultimo_error = exc
+        if url_directa and not directa_usada and loop.time() - inicio >= 12 and not paginas_modulo:
+            directa_usada = True
+            log_fn(f"{nombre} sigue en el portal; abriendo dirección conocida en la misma sesión...")
+            try:
+                await portal.goto(url_directa, wait_until="domcontentloaded", timeout=15000)
+            except Exception as exc:
+                ultimo_error = exc
+        await asyncio.sleep(0.4)
+    detalle = f" Último error: {ultimo_error}" if ultimo_error else ""
+    raise RuntimeError(f"No se confirmó {nombre} en {host} con su menú visible.{detalle}")
+
+
+async def abrir_seccion_pos(page, nombre, log_fn, timeout=30000):
+    """Entra al listado y recupera su pantalla usando el href real del menú."""
+    enlace = page.get_by_role("link", name=nombre, exact=True)
+    if await enlace.count() == 0 or not await enlace.first.is_visible():
+        log_fn("Abriendo menú Artículos...")
+        await page.get_by_text("Artículos", exact=True).first.click()
+    await enlace.wait_for(state="visible", timeout=15000)
+    href = await enlace.get_attribute("href")
+    destino = urljoin(page.url, href) if href else None
+    if destino and urlsplit(destino).hostname != "tivendoapp.defontana.com":
+        destino = None
+    log_fn(f"Entrando al listado {nombre}...")
+    await enlace.click()
+    exportar = page.get_by_role("button", name="Exportar")
+    try:
+        if destino:
+            await page.wait_for_url(destino, timeout=15000)
+        log_fn("Esperando Exportar...")
+        await exportar.wait_for(state="visible", timeout=timeout)
+    except Exception:
+        if not destino:
+            raise
+        log_fn(f"No apareció Exportar; recuperando {nombre} desde su enlace real...")
+        await page.goto(destino, wait_until="domcontentloaded", timeout=30000)
+        await exportar.wait_for(state="visible", timeout=timeout)
+    return page
+
+
+def validar_excel_exportado(archivo: Path, nombre: str, leer_precios=None) -> None:
+    """Rechaza descargas vacías o truncadas antes de reemplazar un Excel previo."""
+    if not archivo.is_file() or archivo.stat().st_size < 100:
+        raise ValueError(f"{nombre}: Defontana entregó un archivo vacío o incompleto")
+    extension = Path(nombre).suffix.lower()
+    if extension == ".xlsx":
+        from openpyxl import load_workbook
+        with zipfile.ZipFile(archivo) as z:
+            if z.testzip() is not None:
+                raise ValueError(f"{nombre}: Excel comprimido incompleto")
+        with archivo.open("rb") as handle:
+            workbook = load_workbook(handle, read_only=True, data_only=True)
+            try:
+                valido = False
+                for hoja in workbook.worksheets:
+                    filas = (fila for fila in hoja.iter_rows(values_only=True)
+                             if any(valor is not None and str(valor).strip() for valor in fila))
+                    if next(filas, None) is not None and next(filas, None) is not None:
+                        valido = True
+                        break
+                if not valido:
+                    raise ValueError(f"{nombre}: Excel sin filas de datos")
+            finally:
+                workbook.close()
+    elif extension == ".xls":
+        with archivo.open("rb") as handle:
+            cabecera = handle.read(8192).lower()
+        if b"<table" not in cabecera and not cabecera.startswith(b"\xd0\xcf\x11\xe0"):
+            raise ValueError(f"{nombre}: formato XLS no reconocido")
+    else:
+        raise ValueError(f"{nombre}: se esperaba un archivo Excel")
+    if leer_precios is not None and not leer_precios(archivo):
+        raise ValueError(f"{nombre}: lista de precios sin artículos válidos")
+
+
+async def guardar_descarga_validada(download, carpeta, nombre_respaldo, log_fn,
+                                   leer_precios=None, provisional=False):
+    """Espera todos los bytes y sustituye el archivo anterior solo tras validarlo."""
+    carpeta = Path(carpeta)
+    carpeta.mkdir(parents=True, exist_ok=True)
+    nombre = Path(download.suggested_filename or nombre_respaldo).name
+    temporal = carpeta / f".mh_{uuid.uuid4().hex}.part"
+    destino = (carpeta / f".mh_{uuid.uuid4().hex}.pending") if provisional else carpeta / nombre
+    try:
+        fallo = await asyncio.wait_for(download.failure(), timeout=300)
+        if fallo:
+            raise RuntimeError(f"Defontana interrumpió la descarga: {fallo}")
+        log_fn(f"Comprobando archivo {nombre}...")
+        await asyncio.wait_for(download.save_as(str(temporal)), timeout=300)
+        validar_excel_exportado(temporal, nombre, leer_precios)
+        os.replace(temporal, destino)
+        log_fn(f"✓ Excel validado: {nombre}")
+        return nombre, str(destino)
+    finally:
+        temporal.unlink(missing_ok=True)
+
+
+async def exportar_excel_pos(page, carpeta, nombre_respaldo, log_fn):
+    """Escucha la página y los popups antes de Exportar; guarda tras validar."""
+    boton = page.get_by_role("button", name="Exportar")
+    await boton.wait_for(state="visible", timeout=30000)
+    recibido = asyncio.get_running_loop().create_future()
+    ventanas = []
+    tareas = []
+
+    def descarga_lista(download):
+        if not recibido.done():
+            recibido.set_result(download)
+
+    async def confirmar_ventana(ventana):
+        limite = asyncio.get_running_loop().time() + 15
+        while not recibido.done() and not ventana.is_closed() and asyncio.get_running_loop().time() < limite:
+            try:
+                confirmar = ventana.get_by_role("button", name="Exportar").first
+                if await confirmar.is_visible():
+                    await confirmar.click()
+                    return
+            except Exception:
+                pass
+            await asyncio.sleep(0.3)
+
+    def ventana_abierta(ventana):
+        ventanas.append(ventana)
+        ventana.on("download", descarga_lista)
+        tareas.append(asyncio.create_task(confirmar_ventana(ventana)))
+
+    page.on("download", descarga_lista)
+    page.on("popup", ventana_abierta)
+    try:
+        log_fn("Pulsando Exportar; esperando descarga directa o ventana de exportación...")
+        await boton.click()
+        download = await asyncio.wait_for(recibido, timeout=300)
+        log_fn("Descarga detectada; esperando y comprobando el Excel...")
+        return await guardar_descarga_validada(download, carpeta, nombre_respaldo, log_fn)
+    finally:
+        page.remove_listener("download", descarga_lista)
+        page.remove_listener("popup", ventana_abierta)
+        for ventana in ventanas:
+            ventana.remove_listener("download", descarga_lista)
+        for tarea in tareas:
+            tarea.cancel()
+        await asyncio.gather(*tareas, return_exceptions=True)
+        await asyncio.gather(*(v.close() for v in ventanas if not v.is_closed()),
+                             return_exceptions=True)
+        if not recibido.done():
+            recibido.cancel()
+
+
+async def asegurar_punto_ventas_abierto(context, page, log_fn):
+    """Abre Tivendo POS desde el portal y verifica que la navegacion realmente ocurrio.
+
+    Sin esta verificacion, un clic en 'Punto de Ventas' que no navega a tiempo deja
+    la pagina en el portal; un locator de texto no exacto para 'Articulos' puede dar
+    falso positivo ahi (el portal tiene 'Revisa articulos de ayuda...' en el pie de
+    pagina), haciendo creer que ya se entro a Tivendo POS cuando no es asi.
+    """
+    return await abrir_modulo_defontana(
+        context, page, "Punto de Ventas", "tivendoapp.defontana.com", ("Artículos",), log_fn
+    )
 
 
 async def ir_a_importadores_mercadohouse(page, nombre_tab: str, log_fn) -> None:
@@ -426,38 +707,76 @@ async def esperar_confirmacion_carga_mercadohouse(page, log_fn, timeout: int = 1
 
 # ── Login helpers ─────────────────────────────────────────────────────────────
 
-async def login_tivendo(page, email: str, password: str, log_fn) -> None:
-    """Login en tivendoapp.defontana.com. Lanza Exception si falla."""
-    log_fn("Abriendo login de Tivendo...")
-    await page.goto("https://tivendoapp.defontana.com/login", timeout=30000)
+class ErrorCredenciales(Exception):
+    def __init__(self, servicio):
+        self.servicio = servicio
+        super().__init__(f"Contraseña incorrecta para {servicio}")
+
+
+class ErrorAccesoDefontana(Exception):
+    """El portal no confirmó el acceso; no repetir automáticamente el envío."""
+
+
+def _es_panel_defontana(url: str) -> bool:
+    destino = urlsplit(str(url))
+    return destino.hostname == "portal.defontana.com" and destino.path.rstrip("/") == "/dashboard"
+
+
+async def _contrasena_rechazada(page):
+    """Reconoce mensajes explícitos de credenciales incorrectas."""
     try:
-        await page.wait_for_selector("input", state="visible", timeout=10000)
+        texto = await page.locator("body").inner_text(timeout=3000)
     except Exception:
-        await esperar_carga_ligera(page)
-        if "login" not in page.url.lower():
-            log_fn("Sesion Tivendo reutilizada")
+        return False
+    texto = unicodedata.normalize("NFKD", texto.lower())
+    texto = "".join(c for c in texto if not unicodedata.combining(c))
+    patrones = (
+        r"(?:contrasena|clave|password|credenciales).{0,55}(?:incorrect|invalid|errone|equivocad)",
+        r"(?:contrasena|clave|password|credenciales).{0,55}(?:no (?:son|es) correct|no (?:son|es) valid|no coinciden)",
+        r"(?:incorrect|invalid|errone|equivocad).{0,55}(?:contrasena|clave|password|credenciales)",
+        r"(?:usuario|correo|email).{0,55}(?:contrasena|clave|password).{0,55}(?:incorrect|invalid)",
+        r"(?:invalid|incorrect) credentials",
+        r"datos de acceso.{0,55}incorrect",
+    )
+    return any(re.search(patron, texto) for patron in patrones)
+
+
+async def login_tivendo(page, email: str, password: str, log_fn) -> None:
+    """Inicia sesión en el portal Defontana para acceder a POS y ERP."""
+    log_fn("Abriendo login del portal Defontana...")
+    await page.goto("https://portal.defontana.com/login", timeout=30000)
+    await esperar_carga_ligera(page)
+    if _es_panel_defontana(page.url):
+        log_fn("Sesión Defontana reutilizada")
+        await guardar_sesion_contexto(page.context, log_fn)
+        return
+    destino = urlsplit(page.url)
+    if destino.hostname != "portal.defontana.com" or destino.path.rstrip("/") != "/login":
+        raise ErrorAccesoDefontana("El portal Defontana no mostró el inicio de sesión ni su panel")
+    try:
+        await page.locator('input[type="password"]').wait_for(state="visible", timeout=15000)
+    except Exception as error:
+        if _es_panel_defontana(page.url):
+            log_fn("Sesión Defontana reutilizada")
             await guardar_sesion_contexto(page.context, log_fn)
             return
-        await page.wait_for_selector("input", state="visible", timeout=20000)
-    log_fn("Ingresando credenciales Tivendo...")
-    inputs = page.locator("input")
-    await inputs.nth(0).click()
-    await inputs.nth(0).press_sequentially(email, delay=20)
-    await pausa_corta()
-    await inputs.nth(1).click()
-    await inputs.nth(1).press_sequentially(password, delay=20)
-    await pausa_corta()
-    await page.get_by_role("button", name="Iniciar Sesión").click()
-    log_fn("Esperando redirección...")
+        raise ErrorAccesoDefontana("El portal Defontana no mostró el formulario de acceso") from error
+    log_fn("Ingresando credenciales en el portal Defontana...")
+    await page.locator('input:not([type="password"]):visible').first.fill(email)
+    await page.locator('input[type="password"]').fill(password)
+    await page.get_by_role("button", name="Confirmar", exact=True).click()
+    log_fn("Esperando el panel Defontana...")
     try:
-        await page.wait_for_url(lambda url: "login" not in url.lower(), timeout=20000)
+        await page.wait_for_url(_es_panel_defontana, timeout=20000)
     except Exception:
         pass
     await esperar_carga_ligera(page)
-    if "login" in page.url.lower():
-        raise Exception("Login Tivendo fallido")
+    if not _es_panel_defontana(page.url):
+        if await _contrasena_rechazada(page):
+            raise ErrorCredenciales("Tivendo")
+        raise ErrorAccesoDefontana("El portal Defontana no confirmó el acceso; no se reintentará automáticamente")
     await guardar_sesion_contexto(page.context, log_fn)
-    log_fn("✓ Login Tivendo exitoso")
+    log_fn("✓ Acceso al portal Defontana comprobado")
 
 
 async def login_mercadohouse(page, email: str, password: str, log_fn) -> None:
@@ -499,6 +818,8 @@ async def login_mercadohouse(page, email: str, password: str, log_fn) -> None:
         pass
     await esperar_carga_ligera(page)
     if "login" in page.url.lower():
+        if await _contrasena_rechazada(page):
+            raise ErrorCredenciales("Mercadohouse")
         try:
             texto = (await page.locator("body").inner_text(timeout=3000)).strip()
             resumen = " ".join(texto.split())[:220]

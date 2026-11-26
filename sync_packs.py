@@ -19,15 +19,19 @@ from app_paths import runtime_path, configure_playwright_browsers, DESCARGA_DIR
 configure_playwright_browsers()
 from playwright.async_api import async_playwright
 from utils import (
+    ErrorAccesoDefontana,
+    ErrorCredenciales,
+    ErrorEtapaFuente,
+    abrir_seccion_pos,
     asegurar_empresa_mercadohouse,
-    click_y_capturar_pagina,
+    asegurar_punto_ventas_abierto,
     crear_logger,
     crear_pagina_trabajo,
     esperar_carga_ligera,
     esperar_confirmacion_carga_mercadohouse,
     guardar_diagnostico,
+    exportar_excel_pos,
     ir_a_importadores_mercadohouse,
-    limpiar_carpeta_archivos,
     login_mercadohouse,
     login_tivendo,
     MedidorEtapas,
@@ -90,10 +94,11 @@ async def subir_packs_mercadohouse(page, ruta_archivo: str, nombre_archivo: str,
 
 async def exportar_packs():
     rotar_log(LOG_FILE)
-    medidor = MedidorEtapas(log)
+    medidor = MedidorEtapas(log, "Packs")
 
     log("=" * 55)
     log("INICIO SYNC PACKS TIVENDO -> MERCADOHOUSE")
+    log("ℹ️ Sincroniza el catálogo completo — no depende de la sucursal activa")
     log("=" * 55)
 
     Path(CARPETA_DESCARGA).mkdir(parents=True, exist_ok=True)
@@ -116,44 +121,17 @@ async def exportar_packs():
                 await asegurar_empresa_mercadohouse(page, log, TIVENDO_EMAIL, TIVENDO_PASSWORD)
 
             with medidor.etapa("Abrir Punto de Ventas"):
-                log("Haciendo clic en Punto de Ventas...")
-                pos_page, nueva_pestana = await click_y_capturar_pagina(
-                    context,
-                    page,
-                    page.get_by_text("Punto de Ventas"),
-                )
-
-            if nueva_pestana:
-                log("Punto de Ventas abrio en pestana nueva")
-            else:
-                log("Punto de Ventas navego en la misma pestana")
-
-            await pos_page.locator("text=Artículos").first.wait_for(state="visible", timeout=25000)
+                pos_page = await asegurar_punto_ventas_abierto(context, page, log)
             log(f"En Punto de Ventas: {pos_page.url}")
 
             with medidor.etapa("Abrir Packs"):
-                log("Navegando a Articulos > Packs...")
-                await pos_page.locator("text=Artículos").first.click()
-                await pos_page.get_by_role("link", name="Packs", exact=True).wait_for(
-                    state="visible",
-                    timeout=10000,
-                )
-                await pos_page.get_by_role("link", name="Packs", exact=True).click()
-                await pos_page.get_by_role("button", name="Exportar").wait_for(
-                    state="visible",
-                    timeout=25000,
-                )
+                await abrir_seccion_pos(pos_page, "Packs", log)
                 log(f"En Packs: {pos_page.url}")
 
             with medidor.etapa("Exportar packs Tivendo"):
-                log("Haciendo clic en Exportar Packs...")
-                async with pos_page.expect_download(timeout=300000) as download_info:
-                    await pos_page.get_by_role("button", name="Exportar").click()
-
-                download = await download_info.value
-                nombre_archivo = download.suggested_filename or "packs.xlsx"
-                ruta_archivo = str(Path(CARPETA_DESCARGA) / nombre_archivo)
-                await download.save_as(ruta_archivo)
+                nombre_archivo, ruta_archivo = await exportar_excel_pos(
+                    pos_page, CARPETA_DESCARGA, "packs.xlsx", log
+                )
 
             log(f"Archivo de packs descargado: {nombre_archivo}")
             log(f"Guardado en: {ruta_archivo}")
@@ -169,17 +147,17 @@ async def exportar_packs():
                 await esperar_confirmacion_carga_mercadohouse(page, log)
             log("Lista de packs cargada")
 
-            try:
-                n = limpiar_carpeta_archivos(CARPETA_DESCARGA)
-                log(f"Carpeta limpiada: {n} archivo(s) eliminado(s)")
-            except Exception as e:
-                log(f"No se pudo limpiar la carpeta: {e}")
-
             log("=" * 55)
             log("SYNC PACKS COMPLETADO")
             log("=" * 55)
 
+        except asyncio.CancelledError:
+            await browser.close()
+            raise
         except Exception as e:
+            if isinstance(e, (ErrorCredenciales, ErrorAccesoDefontana)):
+                await browser.close()
+                raise
             log(f"ERROR: {e}")
             try:
                 captura = pos_page if "pos_page" in dir() else page
@@ -187,12 +165,8 @@ async def exportar_packs():
             except Exception:
                 pass
             medidor.resumen()
-            try:
-                limpiar_carpeta_archivos(CARPETA_DESCARGA)
-            except Exception:
-                pass
             await browser.close()
-            sys.exit(1)
+            raise ErrorEtapaFuente("Packs", medidor.ultima_etapa or "Inicio", e) from e
 
         await browser.close()
         medidor.resumen()

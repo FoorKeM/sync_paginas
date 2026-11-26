@@ -1,0 +1,386 @@
+import json
+import os
+import unittest
+from unittest.mock import MagicMock, patch
+from pathlib import Path
+from subprocess import CompletedProcess
+
+import updater
+
+
+def _fake_response(payload: dict):
+    body = json.dumps(payload).encode("utf-8")
+    cm = MagicMock()
+    cm.__enter__.return_value.read.return_value = body
+    cm.__exit__.return_value = False
+    return cm
+
+
+class UpdaterVersionTests(unittest.TestCase):
+    def test_version_tuple_parses_semver_with_date_suffix(self):
+        self.assertEqual(updater._version_tuple("v1.8.2-2026-08-07"), (1, 8, 2))
+
+    def test_version_tuple_parses_plain_semver(self):
+        self.assertEqual(updater._version_tuple("v1.9.0"), (1, 9, 0))
+
+    def test_version_tuple_defaults_missing_parts_to_zero(self):
+        self.assertEqual(updater._version_tuple("v2"), (2, 0, 0))
+
+
+class BuscarReleaseNuevoTests(unittest.TestCase):
+    def test_returns_none_when_remote_version_is_not_newer(self):
+        payload = {"tag_name": "v1.8.2", "assets": [{"name": "MHSync_V1.8.2.exe", "browser_download_url": "u"}]}
+        with patch("updater.urllib.request.urlopen", return_value=_fake_response(payload)):
+            self.assertIsNone(updater.buscar_release_nuevo("v1.8.2-2026-08-07"))
+
+    def test_returns_none_when_no_exe_asset_present(self):
+        payload = {"tag_name": "v1.9.0", "assets": [{"name": "source.zip", "browser_download_url": "u"}]}
+        with patch("updater.urllib.request.urlopen", return_value=_fake_response(payload)):
+            self.assertIsNone(updater.buscar_release_nuevo("v1.8.2-2026-08-07"))
+
+    def test_raises_error_consulta_on_network_error(self):
+        with patch("updater.urllib.request.urlopen", side_effect=OSError("sin internet")):
+            with self.assertRaises(updater.ErrorConsultaActualizacion):
+                updater.buscar_release_nuevo("v1.8.2-2026-08-07")
+
+    def test_returns_release_info_when_newer_version_with_exe_available(self):
+        payload = {
+            "tag_name": "v1.9.0",
+            "body": "Auto-actualizacion",
+            "assets": [
+                {"name": "source.zip", "browser_download_url": "zip-url"},
+                {"name": "MHSync_V1.9.0.exe", "browser_download_url": "exe-url"},
+            ],
+        }
+        with patch("updater.urllib.request.urlopen", return_value=_fake_response(payload)):
+            info = updater.buscar_release_nuevo("v1.8.2-2026-08-07")
+
+        self.assertEqual(
+            info,
+            {
+                "version": "v1.9.0",
+                "notas": "Auto-actualizacion",
+                "url_descarga": "exe-url",
+                "nombre_archivo": "MHSync_V1.9.0.exe",
+            },
+        )
+
+    def test_returns_release_info_with_fixed_exe_name(self):
+        payload = {
+            "tag_name": "v1.9.24",
+            "body": "Nuevo portal Defontana",
+            "assets": [{"name": "MHSync.exe", "browser_download_url": "exe-url"}],
+        }
+        with patch("updater.urllib.request.urlopen", return_value=_fake_response(payload)):
+            info = updater.buscar_release_nuevo("v1.9.23-2026-08-16")
+
+        self.assertEqual(info["version"], "v1.9.24")
+        self.assertEqual(info["nombre_archivo"], "MHSync.exe")
+
+
+class DescargarActualizacionTests(unittest.TestCase):
+    def test_writes_file_and_reports_cumulative_progress(self):
+        import tempfile
+        from pathlib import Path
+
+        resp = MagicMock()
+        resp.headers = {"Content-Length": "15"}
+        resp.read.side_effect = [b"a" * 10, b"b" * 5, b""]
+        cm = MagicMock()
+        cm.__enter__.return_value = resp
+        cm.__exit__.return_value = False
+
+        progreso = []
+        with tempfile.TemporaryDirectory() as tmp:
+            destino = Path(tmp) / "nuevo.exe"
+            with patch("updater.urllib.request.urlopen", return_value=cm):
+                updater.descargar_actualizacion(
+                    "http://x", destino, progreso_fn=lambda d, t: progreso.append((d, t))
+                )
+            self.assertEqual(destino.read_bytes(), b"a" * 10 + b"b" * 5)
+
+        self.assertEqual(progreso, [(10, 15), (15, 15)])
+
+    def test_progreso_fn_is_optional(self):
+        import tempfile
+        from pathlib import Path
+
+        resp = MagicMock()
+        resp.headers = {}
+        resp.read.side_effect = [b"contenido", b""]
+        cm = MagicMock()
+        cm.__enter__.return_value = resp
+        cm.__exit__.return_value = False
+
+        with tempfile.TemporaryDirectory() as tmp:
+            destino = Path(tmp) / "nuevo.exe"
+            with patch("updater.urllib.request.urlopen", return_value=cm):
+                updater.descargar_actualizacion("http://x", destino)
+            self.assertEqual(destino.read_bytes(), b"contenido")
+
+
+class AplicarActualizacionTests(unittest.TestCase):
+    def test_raises_when_not_frozen(self):
+        with patch("updater.sys.frozen", create=True, new=False):
+            with self.assertRaises(Exception):
+                updater.aplicar_actualizacion_y_reiniciar(None, "MHSync_V1.9.1.exe")
+
+    def test_fixed_release_uses_visible_transitional_installer(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            carpeta = Path(tmp)
+            viejo = carpeta / "MHSync.exe"
+            viejo.write_bytes(b"viejo")
+            nuevo = carpeta / "descargado.exe"
+            nuevo.write_bytes(b"nuevo")
+            with (
+                patch("updater.sys.frozen", create=True, new=True),
+                patch("updater.sys.executable", str(viejo)),
+                patch("updater.subprocess.Popen") as abrir,
+                patch("updater.sys.exit") as salir,
+            ):
+                updater.aplicar_actualizacion_y_reiniciar(nuevo, "MHSync.exe")
+
+            instalador = carpeta / "MHSync_Instalar.exe"
+            self.assertEqual(instalador.read_bytes(), b"nuevo")
+            self.assertEqual(viejo.read_bytes(), b"viejo")
+            self.assertEqual(abrir.call_args.args[0], [str(instalador.resolve())])
+            self.assertEqual(abrir.call_args.kwargs["creationflags"], updater.subprocess.CREATE_NEW_CONSOLE)
+            self.assertEqual(abrir.call_args.kwargs["env"]["PYINSTALLER_RESET_ENVIRONMENT"], "1")
+            self.assertFalse((carpeta / "_actualizar_mhsync.bat").exists())
+            salir.assert_called_once_with(0)
+
+    def test_bat_script_replaces_versioned_exe_with_fixed_name(self):
+        import tempfile
+        from pathlib import Path
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = Path(tmp).resolve()
+            exe_viejo = tmp_dir / "MHSync_V1.9.0.exe"
+            exe_viejo.write_text("viejo", encoding="utf-8")
+            nuevo_exe = tmp_dir / "descarga_temp.exe"
+            nuevo_exe.write_text("nuevo", encoding="utf-8")
+
+            with (
+                patch("updater.sys.frozen", create=True, new=True),
+                patch("updater.sys.executable", str(exe_viejo)),
+                patch("updater.subprocess.Popen") as popen,
+                patch("updater.sys.exit") as exit_mock,
+            ):
+                updater.aplicar_actualizacion_y_reiniciar(nuevo_exe, "MHSync.exe")
+
+            bat_path = tmp_dir / "_actualizar_mhsync.bat"
+            contenido = bat_path.read_text(encoding="utf-8")
+
+            self.assertIn(str(tmp_dir / "MHSync.exe"), contenido)
+            self.assertIn(f'del /F /Q "{exe_viejo}"', contenido)
+            self.assertIn(str(updater.DATA_DIR / "_actualizar_mhsync_log.txt"), contenido)
+            self.assertIn(":reintentar_mover", contenido)
+            self.assertIn("MOVER_INTENTOS! lss 20", contenido)
+            self.assertIn('start "" /D', contenido)
+            self.assertIn('IMAGENAME eq MHSync.exe', contenido)
+            self.assertEqual(popen.call_args.kwargs["env"]["PYINSTALLER_RESET_ENVIRONMENT"], "1")
+            self.assertIn('REABRIR_INTENTOS! lss 3', contenido)
+            popen.assert_called_once()
+            self.assertEqual(popen.call_args.kwargs["creationflags"], updater.subprocess.CREATE_NO_WINDOW)
+            exit_mock.assert_called_once_with(0)
+
+    def test_transitional_asset_checks_that_final_program_is_running(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            old = root / "MHSync.exe"
+            downloaded = root / "download.tmp"
+            old.write_bytes(b"old")
+            downloaded.write_bytes(b"new")
+            with (
+                patch("updater.sys.frozen", create=True, new=True),
+                patch("updater.sys.executable", str(old)),
+                patch("updater.subprocess.Popen"),
+                patch("updater.sys.exit"),
+            ):
+                updater.aplicar_actualizacion_y_reiniciar(downloaded, "MHSync_Instalar.exe")
+
+            batch = (root / "_actualizar_mhsync.bat").read_text(encoding="utf-8")
+            self.assertIn('start "" /D', batch)
+            self.assertIn('IMAGENAME eq MHSync.exe', batch)
+            self.assertNotIn('IMAGENAME eq MHSync_Instalar.exe', batch)
+
+
+class LimpiezaActualizacionTests(unittest.TestCase):
+    def test_transitional_installer_copies_to_stable_name_and_relaunches(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            carpeta = Path(tmp)
+            instalador = carpeta / "MHSync_Instalar.exe"
+            instalador.write_bytes(b"version nueva")
+            (carpeta / "MHSync.exe").write_bytes(b"version antigua")
+            (carpeta / "_actualizar_mhsync_log.txt").write_text("ERROR", encoding="utf-8")
+
+            with (
+                patch("updater.sys.frozen", create=True, new=True),
+                patch("updater.sys.executable", str(instalador)),
+                patch("updater.subprocess.Popen") as popen,
+                patch("updater.sys.exit") as exit_mock,
+            ):
+                updater.finalizar_instalacion_transitoria(input_fn=lambda _: self.fail("No debe pedir confirmación"))
+
+            self.assertEqual((carpeta / "MHSync.exe").read_bytes(), b"version nueva")
+            self.assertFalse((carpeta / "_actualizar_mhsync_log.txt").exists())
+            self.assertEqual(
+                popen.call_args.args[0],
+                [str((carpeta / "MHSync.exe").resolve()), "--limpiar-instalador", str(instalador.resolve())],
+            )
+            self.assertEqual(popen.call_args.kwargs["env"]["PYINSTALLER_RESET_ENVIRONMENT"], "1")
+            exit_mock.assert_called_once_with(0)
+
+    def test_transitional_installer_asks_before_forcing_old_process_closed(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            carpeta = Path(tmp)
+            instalador = carpeta / "MHSync_Instalar.exe"
+            instalador.write_bytes(b"version nueva")
+            viejo = carpeta / "MHSync.exe"
+            viejo.write_bytes(b"version antigua")
+            unlink_real = Path.unlink
+            estado = {"n": 0, "cerrado": False}
+
+            def unlink_con_bloqueo(path, *args, **kwargs):
+                if path == viejo.resolve() and not estado["cerrado"]:
+                    estado["n"] += 1
+                    raise PermissionError("en uso")
+                return unlink_real(path, *args, **kwargs)
+
+            def cerrar_viejo(_nombre):
+                estado["cerrado"] = True
+                return True
+
+            with (
+                patch("updater.sys.frozen", create=True, new=True),
+                patch("updater.sys.executable", str(instalador)),
+                patch.object(Path, "unlink", unlink_con_bloqueo),
+                patch("updater.cerrar_ejecutable", side_effect=cerrar_viejo) as cerrar,
+                patch("updater.time.sleep"),
+                patch("updater.subprocess.Popen"),
+                patch("updater.sys.exit"),
+            ):
+                updater.finalizar_instalacion_transitoria(input_fn=lambda _: "s")
+
+            cerrar.assert_called_once_with("MHSync.exe")
+            self.assertEqual(estado["n"], 20)
+            self.assertEqual(viejo.read_bytes(), b"version nueva")
+
+    def test_transitional_installer_waits_for_old_process_to_release_file(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            carpeta = Path(tmp)
+            instalador = carpeta / "MHSync_Instalar.exe"
+            instalador.write_bytes(b"version nueva")
+            viejo = carpeta / "MHSync.exe"
+            viejo.write_bytes(b"version antigua")
+            unlink_real = Path.unlink
+            intentos = {"n": 0}
+
+            def unlink_temporalmente_bloqueado(path, *args, **kwargs):
+                if path == viejo.resolve() and intentos["n"] < 3:
+                    intentos["n"] += 1
+                    raise PermissionError("en uso")
+                return unlink_real(path, *args, **kwargs)
+
+            with (
+                patch("updater.sys.frozen", create=True, new=True),
+                patch("updater.sys.executable", str(instalador)),
+                patch.object(Path, "unlink", unlink_temporalmente_bloqueado),
+                patch("updater.time.sleep"),
+                patch("updater.cerrar_ejecutable") as cerrar,
+                patch("updater.subprocess.Popen"),
+                patch("updater.sys.exit"),
+            ):
+                updater.finalizar_instalacion_transitoria(input_fn=lambda _: self.fail("No debe pedir confirmación"))
+
+            self.assertEqual(intentos["n"], 3)
+            self.assertEqual(viejo.read_bytes(), b"version nueva")
+            cerrar.assert_not_called()
+
+    def test_final_exe_removes_transitional_installer_and_old_log(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            carpeta = Path(tmp)
+            instalador = carpeta / "MHSync_Instalar.exe"
+            instalador.write_bytes(b"version nueva")
+            log = carpeta / "_actualizar_mhsync_log.txt"
+            log.write_text("ERROR", encoding="utf-8")
+
+            self.assertTrue(updater.limpiar_instalador_transitorio(carpeta, instalador))
+            self.assertFalse(instalador.exists())
+            self.assertFalse(log.exists())
+
+    def test_removes_old_exe_and_log_after_legacy_update(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            carpeta = Path(tmp)
+            viejo = carpeta / "MHSync_V1.9.23.exe"
+            viejo.write_bytes(b"antiguo")
+            log = carpeta / "_actualizar_mhsync_log.txt"
+            log.write_text(
+                f"{viejo}\nADVERTENCIA: no se pudo borrar el archivo viejo tras 5 intentos.\n",
+                encoding="utf-8",
+            )
+
+            updater.limpiar_actualizacion_anterior(carpeta, input_fn=lambda _: self.fail("No debe pedir confirmación"))
+
+            self.assertFalse(viejo.exists())
+            self.assertFalse(log.exists())
+
+    def test_asks_before_forcing_closed_old_exe(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            carpeta = Path(tmp)
+            viejo = carpeta / "MHSync_V1.9.23.exe"
+            viejo.write_bytes(b"antiguo")
+            log = carpeta / "_actualizar_mhsync_log.txt"
+            log.write_text(
+                f"{viejo}\nADVERTENCIA: no se pudo borrar el archivo viejo tras 5 intentos.\n",
+                encoding="utf-8",
+            )
+            unlink_real = Path.unlink
+            intentos = {"viejo": 0}
+
+            def unlink_con_bloqueo(path, *args, **kwargs):
+                if path == viejo and intentos["viejo"] == 0:
+                    intentos["viejo"] += 1
+                    raise PermissionError("en uso")
+                return unlink_real(path, *args, **kwargs)
+
+            with patch.object(Path, "unlink", unlink_con_bloqueo), patch(
+                "updater.cerrar_ejecutable", return_value=True,
+            ) as cerrar:
+                updater.limpiar_actualizacion_anterior(carpeta, input_fn=lambda _: "s")
+
+            cerrar.assert_called_once_with(viejo.name)
+            self.assertFalse(viejo.exists())
+            self.assertFalse(log.exists())
+
+    @unittest.skipUnless(os.name == "nt", "tasklist solo existe en Windows")
+    def test_detects_other_open_version_by_process_name(self):
+        salida = '\n'.join((
+            '"MHSync.exe","100","Console","1","10,000 K"',
+            '"MHSync_V1.9.23.exe","200","Console","1","10,000 K"',
+            '"notepad.exe","300","Console","1","10,000 K"',
+        ))
+        with patch("updater.sys.executable", r"C:\Apps\MHSync.exe"), patch(
+            "updater.subprocess.run", return_value=CompletedProcess([], 0, salida, ""),
+        ):
+            self.assertEqual(updater.otras_versiones_abiertas(), ["MHSync_V1.9.23.exe"])
+
+
+if __name__ == "__main__":
+    unittest.main()
